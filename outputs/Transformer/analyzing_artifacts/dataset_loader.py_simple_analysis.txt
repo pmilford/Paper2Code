@@ -1,0 +1,89 @@
+Below is a detailed logic analysis for the DatasetLoader module. This module’s primary responsibility is to load raw dataset files (from translation or parsing tasks), apply the appropriate tokenization, build the vocabulary, and then create batches based on approximate token counts before returning train, validation, and test splits. The analysis below follows the paper’s experimental design, the overall project plan, the module design and call flow, and uses configuration parameters provided in config.yaml.
+
+──────────────────────────────
+1. Initialization & Configuration Parsing
+
+• The DatasetLoader class will be initialized with a configuration dictionary (parsed from config.yaml).  
+• In its __init__ method, it will:
+  – Read the “data” section from the configuration.
+  – Determine which task is being run (translation vs. parsing). Although the config only lists dataset options, the DatasetLoader should be written to support either task.
+  – For translation:
+      • Read parameters for either “wmt14_en_de” or “wmt14_en_fr” (such as vocab_size, tokenization type, and batch_tokens).
+  – For parsing:
+      • Read parameters (e.g., “wsj” or “semi_supervised”) along with the appropriate vocabulary size.
+  – Store any additional configuration details (like directory paths or file names if provided elsewhere) that might be needed to locate raw data files.
+
+──────────────────────────────
+2. Raw Data Loading
+
+• The load_data() method will be responsible for reading raw text. Depending on the data type:
+  – For translation experiments:
+      • Load parallel corpora (source and target texts) from files or via a data library (e.g., torchtext or HuggingFace Datasets).
+      • Identify and separate training, validation, and test splits as typically defined (e.g., newstest2013 for dev, newstest2014 for test).
+  – For parsing experiments:
+      • Load sentence (and possibly tree) data from the WSJ portion of the Penn Treebank (or the additional semi-supervised corpus for the larger experiment).
+  – The method should be able to return a tuple like (train_data, valid_data, test_data) where each split is a collection of raw examples (likely as lists of strings).
+
+──────────────────────────────
+3. Tokenization & Vocabulary Building
+
+• Based on the configuration’s tokenization setting:
+  – If tokenization is specified as "Byte-Pair Encoding" (for WMT 2014 English–German):
+      • Apply a BPE algorithm to each sentence.
+      • Build (or load a pre-built) shared vocabulary with a size of 37,000 tokens.
+  – If tokenization is specified as "Word-piece" (for WMT 2014 English–French):
+      • Apply a word-piece segmentation procedure.
+      • Build a shared vocabulary with a size of 32,000 tokens.
+  – For parsing datasets:
+      • Use the given vocabulary size (e.g., 16,000 for WSJ only or 32,000 for semi-supervised) and apply a similar tokenization method.
+• The module should include utility functions (or use an existing library) such as:
+  – tokenize_text(text: str, tokenization_type: str) → List[int]
+      • This function will convert raw strings to a sequence of token ids.
+  – build_vocab(raw_data: List[str], vocab_size: int) → dict mapping tokens to indices
+• Optionally add beginning-of-sentence (BOS) and end-of-sentence (EOS) markers when tokenizing—this is important for the decoder in the Transformer model.
+
+──────────────────────────────
+4. Dynamic Batching Based on Sequence Length
+
+• After tokenization, the examples must be batched such that each batch has roughly the same total number of tokens.
+• Use the “batch_tokens” parameter from the configuration (25000 tokens per batch for both source and target in translation tasks) to guide dynamic batching.
+  – Create a batching algorithm that:
+      • Sorts or groups examples by similar sequence lengths (to minimize the amount of padding).
+      • Iterates over the examples and accumulates examples until the total number of tokens reaches (approximately) the batch_tokens threshold.
+• The batching logic must be designed separately for training (where shuffling is required) and evaluation (where the order should be preserved).
+• The final output batches should be padded appropriately (most likely via a collate function) so that each batch can be fed into the model.
+
+──────────────────────────────
+5. Data Splits, Shuffling, and Iterators
+
+• For the training split:
+  – Shuffle the dataset after tokenization.
+  – Create an iterator or DataLoader (using PyTorch’s DataLoader if desired) that yields batches with padded tensor arrays.
+• For validation/test splits:
+  – Do not shuffle; just batch based on the desired batch token count.
+• Ensure that the output of load_data() returns (train_data, valid_data, test_data) in a format that the Trainer module can directly consume.
+
+──────────────────────────────
+6. Integration and Utility Functions
+
+• The class may include additional helper methods such as:
+  – read_raw_data(file_path: str) to open and read text files.
+  – create_batches(examples: List[List[int]], batch_tokens: int) which implements the dynamic batching strategy.
+  – Optionally, if using torchtext or HuggingFace Datasets, integrate their dataset classes to streamline loading and tokenization.
+• Logging: Include (using a shared logging mechanism) status messages so that the progress of loading, tokenization, and batching can be monitored (with intervals determined by the logging configuration).
+
+──────────────────────────────
+7. Error Handling & Config Robustness
+
+• Validate that the required fields (e.g., “vocab_size”, “tokenization”, and “batch_tokens”) exist in the configuration for the selected dataset.
+• Provide meaningful error messages if a required configuration is missing or if raw data files are not found.
+• Ensure that the tokenization functions are modular, so switching from BPE to word-piece (or even a learned tokenizer in the future) does not require changing the overall design.
+
+──────────────────────────────
+8. Summary & Alignment with Requirements
+
+• This module follows the design specification where DatasetLoader provides a clean interface (load_data()) to supply the training, validation, and test datasets in a preprocessed (tokenized and batched) format.  
+• The approach directly reflects the experimental setup described in the paper (e.g., correct tokenization method per dataset, batch sizing approximately 25000 tokens per side, and proper vocabulary sizes).  
+• The design also strictly follows our “Data structures and interfaces” diagram and integrates settings solely from config.yaml (e.g., vocab sizes, tokenization type, and batch token targets).  
+
+By following the steps outlined above, the DatasetLoader will produce the necessary data iterators that can be used by the Trainer and Evaluator modules, ensuring that all experiments are reproducible and aligned with the Transformer implementation as described in “Attention Is All You Need.”

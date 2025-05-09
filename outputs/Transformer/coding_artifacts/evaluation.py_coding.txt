@@ -1,0 +1,340 @@
+```python
+"""evaluation.py
+
+This module implements the Evaluator class for Transformer experiments.
+It supports evaluation of translation tasks (computing corpus-level BLEU score)
+and constituency parsing tasks (computing F1 score), using beam search decoding.
+
+The Evaluator is instantiated with:
+  - A TransformerModel instance (from model.py)
+  - Evaluation data as produced by dataset_loader.py
+  - A configuration dictionary parsed from config.yaml
+
+It implements:
+  - beam_search(src, src_mask) -> Tensor : performs beam search decoding for a single example.
+  - evaluate() -> dict : iterates over eval data, decodes predictions, computes evaluation metrics,
+      and returns a dictionary of metrics.
+
+All decoding hyperparameters (beam size, length penalty, maximum length offset) are read from config.yaml.
+"""
+
+import math
+import logging
+from collections import Counter, defaultdict
+from typing import Any, Dict, List, Tuple, Union
+
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
+
+# Hard-coded special token IDs (must match those in dataset_loader.py and model.py)
+PAD_ID: int = 0
+BOS_ID: int = 1
+EOS_ID: int = 2
+
+
+def compute_bleu(candidate_corpus: List[List[int]], reference_corpus: List[List[int]], max_n: int = 4) -> float:
+    """
+    Computes a simple corpus-level BLEU score.
+    
+    This implementation computes modified n-gram precisions for n=1 to max_n,
+    applies geometric mean and a brevity penalty.
+    
+    Args:
+        candidate_corpus (List[List[int]]): List of candidate token sequences (list of token IDs).
+        reference_corpus (List[List[int]]): List of reference token sequences (list of token IDs).
+        max_n (int): Maximum n-gram order (default is 4).
+        
+    Returns:
+        float: The corpus-level BLEU score (between 0 and 100).
+    """
+    def _get_ngrams(sequence: List[int], n: int) -> Counter:
+        ngrams = Counter()
+        for i in range(len(sequence) - n + 1):
+            ngram = tuple(sequence[i:i+n])
+            ngrams[ngram] += 1
+        return ngrams
+
+    precisions = []
+    total_candidate_ngrams = 0
+    total_clipped_counts = 0
+
+    # Accumulate candidate and reference lengths for brevity penalty.
+    total_candidate_length = 0
+    total_reference_length = 0
+
+    for candidate, reference in zip(candidate_corpus, reference_corpus):
+        # Remove BOS and EOS tokens from both candidate and reference.
+        cand_seq = [token for token in candidate if token not in (BOS_ID, EOS_ID, PAD_ID)]
+        ref_seq = [token for token in reference if token not in (BOS_ID, EOS_ID, PAD_ID)]
+        total_candidate_length += len(cand_seq)
+        total_reference_length += len(ref_seq)
+        
+        candidate_counts = defaultdict(int)
+        max_ref_counts = defaultdict(int)
+        
+        for n in range(1, max_n + 1):
+            cand_ngrams = _get_ngrams(cand_seq, n)
+            ref_ngrams = _get_ngrams(ref_seq, n)
+            # Update max count for each n-gram from reference.
+            for ngram, count in ref_ngrams.items():
+                max_ref_counts[ngram] = max(max_ref_counts.get(ngram, 0), count)
+            # For candidate, accumulate counts.
+            for ngram, count in cand_ngrams.items():
+                candidate_counts[ngram] += count
+        
+        clipped_count = 0
+        total_count = 0
+        # For each n-gram in candidate_counts, clip count by max_ref_counts.
+        for ngram, count in candidate_counts.items():
+            max_ref = max_ref_counts.get(ngram, 0)
+            clipped_count += min(count, max_ref)
+            total_count += count
+        if total_count == 0:
+            precisions.append(0)
+        else:
+            precisions.append(clipped_count / total_count)
+    
+    # Compute geometric mean of n-gram precisions.
+    # To avoid math domain errors if a precision is zero, use smoothing (add a small epsilon)
+    smooth = 1e-9
+    log_prec_sum = 0.0
+    for p in precisions:
+        log_prec_sum += math.log(p + smooth)
+    geo_mean = math.exp(log_prec_sum / max_n)
+
+    # Brevity penalty.
+    if total_candidate_length == 0:
+        bp = 0
+    elif total_candidate_length > total_reference_length:
+        bp = 1
+    else:
+        bp = math.exp(1 - total_reference_length / total_candidate_length)
+        
+    bleu = bp * geo_mean * 100
+    return bleu
+
+
+def compute_f1(candidate_corpus: List[List[int]], reference_corpus: List[List[int]]) -> float:
+    """
+    Computes an average token-level F1 score over the corpus.
+    This simplified F1 score computes overlap between candidate and reference tokens 
+    (ignoring BOS, EOS and PAD tokens).
+    
+    Args:
+        candidate_corpus (List[List[int]]): List of candidate token sequences.
+        reference_corpus (List[List[int]]): List of reference token sequences.
+        
+    Returns:
+        float: The average F1 score (0 to 100).
+    """
+    f1_scores = []
+    for candidate, reference in zip(candidate_corpus, reference_corpus):
+        cand_tokens = [t for t in candidate if t not in (BOS_ID, EOS_ID, PAD_ID)]
+        ref_tokens = [t for t in reference if t not in (BOS_ID, EOS_ID, PAD_ID)]
+        if not cand_tokens or not ref_tokens:
+            f1_scores.append(0.0)
+            continue
+        cand_counter = Counter(cand_tokens)
+        ref_counter = Counter(ref_tokens)
+        # Count common tokens.
+        common = sum((cand_counter & ref_counter).values())
+        precision = common / len(cand_tokens) if cand_tokens else 0
+        recall = common / len(ref_tokens) if ref_tokens else 0
+        if precision + recall == 0:
+            f1 = 0.0
+        else:
+            f1 = 2 * precision * recall / (precision + recall)
+        f1_scores.append(f1 * 100)  # scale to percentage
+    average_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+    return average_f1
+
+
+class Evaluator:
+    """
+    Evaluator class for computing evaluation metrics on Transformer models.
+    
+    It supports beam search based decoding and computes BLEU score for translation tasks
+    and F1 score for constituency parsing tasks.
+    
+    Methods:
+      - beam_search(src: Tensor, src_mask: Tensor) -> List[int]
+      - evaluate() -> dict
+    """
+    def __init__(self, model: torch.nn.Module, eval_data: List[Any], config: Dict[str, Any]) -> None:
+        """
+        Initializes the Evaluator.
+        
+        Args:
+            model (torch.nn.Module): The TransformerModel instance.
+            eval_data (List[Any]): Evaluation data batches as produced by dataset_loader.py.
+              For translation tasks, each element is a tuple (src, tgt) of torch.Tensors.
+              For parsing tasks, each element is a torch.Tensor.
+            config (Dict[str, Any]): Configuration dictionary (parsed from config.yaml).
+        """
+        self.model = model
+        self.eval_data = eval_data
+        self.config = config
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.model.eval()
+
+        # Determine the task type based on the evaluation data.
+        # If the first element is a tuple of length 2, we assume a translation task.
+        sample = self.eval_data[0]
+        if isinstance(sample, tuple) and len(sample) == 2:
+            self.task = "translation"
+            decoding_config = self.config.get("decoding", {}).get("translation", {})
+        else:
+            self.task = "parsing"
+            decoding_config = self.config.get("decoding", {}).get("parsing", {})
+
+        self.beam_size: int = decoding_config.get("beam_size", 4)
+        self.length_penalty: float = decoding_config.get("length_penalty", 0.6)
+        self.max_length_offset: int = decoding_config.get("max_length_offset", 50)
+        logging.info(f"Evaluator initialized for task: {self.task} with beam size {self.beam_size}, "
+                     f"length penalty {self.length_penalty}, max_length_offset {self.max_length_offset}")
+
+    def beam_search(self, src: torch.Tensor, src_mask: torch.Tensor) -> List[int]:
+        """
+        Performs beam search decoding for a single source example.
+        
+        Args:
+            src (torch.Tensor): Source sequence tensor of shape (1, src_seq_len).
+            src_mask (torch.Tensor): Source mask tensor of shape (1, src_seq_len) (boolean).
+        
+        Returns:
+            List[int]: The decoded token ids for the best hypothesis.
+        """
+        self.model.eval()
+        device = self.device
+        # Ensure src has batch dimension of 1.
+        if src.dim() == 1:
+            src = src.unsqueeze(0)
+        if src_mask.dim() == 1:
+            src_mask = src_mask.unsqueeze(0)
+        
+        # Compute encoder output once.
+        with torch.no_grad():
+            src_emb = self.model.embedding(src) * math.sqrt(self.model.d_model)
+            src_emb = self.model.pos_encoding(src_emb)
+            encoder_output = self.model.encoder(src_emb, src_mask)
+        
+        max_length = src.size(1) + self.max_length_offset  # maximum target length allowed
+        
+        # Initialize beam with a single hypothesis: ([BOS_ID], score=0.0)
+        beam: List[Tuple[List[int], float]] = [([BOS_ID], 0.0)]
+        completed_hypotheses: List[Tuple[List[int], float]] = []
+
+        for _ in range(max_length - 1):
+            new_beam: List[Tuple[List[int], float]] = []
+            # For each hypothesis in beam, expand if not ended.
+            for seq, score in beam:
+                if seq[-1] == EOS_ID:
+                    # Already complete; carry over to new beam.
+                    new_beam.append((seq, score))
+                    continue
+
+                # Prepare decoder input tensor of shape (1, current_length)
+                dec_input = torch.tensor(seq, dtype=torch.long, device=device).unsqueeze(0)
+                tgt_len = dec_input.size(1)
+                # Generate subsequent mask using the model's helper function.
+                tgt_mask = self.model.generate_square_subsequent_mask(tgt_len).to(device)
+                with torch.no_grad():
+                    tgt_emb = self.model.embedding(dec_input) * math.sqrt(self.model.d_model)
+                    tgt_emb = self.model.pos_encoding(tgt_emb)
+                    decoder_output = self.model.decoder(tgt_emb, tgt_mask, encoder_output, src_mask)
+                    logits = self.model.output_linear(decoder_output)  # shape: (1, tgt_len, vocab_size)
+                    next_token_logits = logits[:, -1, :]  # shape: (1, vocab_size)
+                    log_probs = F.log_softmax(next_token_logits, dim=-1)  # shape: (1, vocab_size)
+                
+                # Get top beam_size token predictions for this hypothesis.
+                topk_log_probs, topk_indices = torch.topk(log_probs, self.beam_size, dim=-1)
+                topk_log_probs = topk_log_probs.squeeze(0).tolist()
+                topk_indices = topk_indices.squeeze(0).tolist()
+
+                for log_prob, token_id in zip(topk_log_probs, topk_indices):
+                    new_seq = seq + [token_id]
+                    new_score = score + log_prob  # cumulative log-probability
+                    new_beam.append((new_seq, new_score))
+
+            # If no new hypotheses, break.
+            if not new_beam:
+                break
+
+            # Keep top beam_size hypotheses based on adjusted score.
+            # Adjusted score includes length penalty: score / (len(seq)^length_penalty)
+            def adjusted_score(item: Tuple[List[int], float]) -> float:
+                seq, sc = item
+                length = len(seq)
+                # Avoid division by zero.
+                norm = (length ** self.length_penalty) if length > 0 else 1.0
+                return sc / norm
+
+            new_beam = sorted(new_beam, key=adjusted_score, reverse=True)[:self.beam_size]
+            beam = new_beam
+
+            # If all hypotheses in beam have generated EOS, we can stop.
+            if all(seq[-1] == EOS_ID for seq, _ in beam):
+                break
+
+        # Select the best hypothesis from beam using adjusted score.
+        best_seq, best_score = max(beam, key=lambda item: item[1] / (len(item[0]) ** self.length_penalty if len(item[0]) > 0 else 1.0))
+        return best_seq
+
+    def evaluate(self) -> Dict[str, float]:
+        """
+        Evaluates the model on the evaluation dataset and computes
+        the appropriate evaluation metric:
+          - BLEU score for translation tasks.
+          - F1 score for constituency parsing tasks.
+        
+        Returns:
+            Dict[str, float]: A dictionary with evaluation metrics.
+                (e.g., { "BLEU": score } or { "F1": score } )
+        """
+        self.model.eval()
+        all_candidates: List[List[int]] = []
+        all_references: List[List[int]] = []
+
+        total_batches = len(self.eval_data)
+        progress_bar = tqdm(enumerate(self.eval_data), total=total_batches, desc="Evaluating")
+        
+        with torch.no_grad():
+            for batch_idx, batch in progress_bar:
+                # For translation tasks, batch is a tuple (src, tgt).
+                if self.task == "translation":
+                    src_batch, tgt_batch = batch  # both are torch.Tensor of shape (B, seq_len)
+                    batch_size = src_batch.size(0)
+                    for i in range(batch_size):
+                        src_sample = src_batch[i]  # shape: (seq_len,)
+                        # Create src mask: True for non-PAD tokens.
+                        src_mask = (src_sample != PAD_ID).unsqueeze(0)  # shape: (1, seq_len)
+                        candidate_seq = self.beam_search(src_sample, src_mask)
+                        all_candidates.append(candidate_seq)
+                        # Get reference sequence from tgt_batch (convert to list)
+                        ref_seq = tgt_batch[i].tolist()
+                        all_references.append(ref_seq)
+                else:
+                    # For parsing tasks, each batch is a single Tensor.
+                    # Here, we assume each sample is processed similarly.
+                    src_batch = batch  # shape: (B, seq_len)
+                    batch_size = src_batch.size(0)
+                    for i in range(batch_size):
+                        src_sample = src_batch[i]
+                        src_mask = (src_sample != PAD_ID).unsqueeze(0)
+                        candidate_seq = self.beam_search(src_sample, src_mask)
+                        all_candidates.append(candidate_seq)
+                        # In parsing, the reference is the same as the target.
+                        all_references.append(src_sample.tolist())
+                progress_bar.set_postfix({"processed_batches": batch_idx + 1})
+
+        if self.task == "translation":
+            bleu_score = compute_bleu(all_candidates, all_references, max_n=4)
+            logging.info(f"Evaluation complete. BLEU score: {bleu_score:.2f}")
+            return {"BLEU": bleu_score}
+        else:
+            f1_score = compute_f1(all_candidates, all_references)
+            logging.info(f"Evaluation complete. F1 score: {f1_score:.2f}")
+            return {"F1": f1_score}
+```

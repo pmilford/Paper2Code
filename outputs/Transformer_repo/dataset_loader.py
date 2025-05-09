@@ -1,0 +1,371 @@
+"""dataset_loader.py
+
+This module implements the DatasetLoader class responsible for loading and preprocessing
+datasets for both translation and parsing tasks according to the Transformer paper.
+It reads raw data from text files, builds a shared vocabulary, tokenizes the sentences,
+and creates dynamic batches based on approximate token counts.
+"""
+
+import os
+import logging
+import random
+from collections import Counter
+from typing import List, Tuple, Dict, Any
+
+import torch
+
+# Define special tokens and their fixed IDs
+PAD_TOKEN: str = "<pad>"
+BOS_TOKEN: str = "<bos>"
+EOS_TOKEN: str = "<eos>"
+UNK_TOKEN: str = "<unk>"
+
+PAD_ID: int = 0
+BOS_ID: int = 1
+EOS_ID: int = 2
+UNK_ID: int = 3
+
+
+class DatasetLoader:
+    """DatasetLoader loads raw data, builds vocabulary, tokenizes text, and creates batches.
+
+    It supports both translation and parsing experiments. The configuration is parsed
+    from a dictionary (from config.yaml). For translation, it loads parallel corpora;
+    for parsing, it loads single-sentence data.
+    """
+
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """
+        Initializes the DatasetLoader with configuration.
+        
+        Args:
+            config (Dict[str, Any]): Configuration dictionary (parsed from config.yaml).
+        """
+        self.config: Dict[str, Any] = config
+        self.data_config: Dict[str, Any] = config.get("data", {})
+        self.task: str = ""
+        self.dataset_name: str = ""
+        self.dataset_config: Dict[str, Any] = {}
+        self.vocab: Dict[str, int] = {}
+
+        # Determine task type: prefer translation if available, else parsing.
+        if "translation" in self.data_config:
+            self.task = "translation"
+            translation_datasets: Dict[str, Any] = self.data_config["translation"]
+            # Choose the first available translation dataset by default.
+            self.dataset_name = next(iter(translation_datasets))
+            self.dataset_config = translation_datasets[self.dataset_name]
+        elif "parsing" in self.data_config:
+            self.task = "parsing"
+            parsing_datasets: Dict[str, Any] = self.data_config["parsing"]
+            self.dataset_name = next(iter(parsing_datasets))
+            self.dataset_config = parsing_datasets[self.dataset_name]
+        else:
+            raise ValueError("No valid data configuration found in config (neither 'translation' nor 'parsing').")
+
+        logging.info(f"DatasetLoader initialized with task: {self.task}, dataset: {self.dataset_name}")
+
+    def load_data(self) -> Tuple[Any, Any, Any]:
+        """
+        Loads the dataset and returns preprocessed splits.
+        
+        Returns:
+            Tuple containing training data, validation data, and test data batches.
+            For translation, each element is a tuple (src_batch, tgt_batch) of torch.Tensors.
+            For parsing, each element is a torch.Tensor batch.
+        """
+        if self.task == "translation":
+            return self._load_translation_data()
+        elif self.task == "parsing":
+            return self._load_parsing_data()
+        else:
+            raise ValueError(f"Unsupported task type: {self.task}")
+
+    def _load_translation_data(self) -> Tuple[Any, Any, Any]:
+        """Loads and preprocesses translation data (parallel corpora)."""
+        # Construct file paths assuming the following naming convention:
+        # For a dataset name like "wmt14_en_de" or "wmt14_en_fr",
+        # the files are located in the './data' folder.
+        train_src_path: str = os.path.join("data", f"{self.dataset_name}.train.src")
+        train_tgt_path: str = os.path.join("data", f"{self.dataset_name}.train.tgt")
+        valid_src_path: str = os.path.join("data", f"{self.dataset_name}.valid.src")
+        valid_tgt_path: str = os.path.join("data", f"{self.dataset_name}.valid.tgt")
+        test_src_path: str = os.path.join("data", f"{self.dataset_name}.test.src")
+        test_tgt_path: str = os.path.join("data", f"{self.dataset_name}.test.tgt")
+
+        logging.info("Loading translation training data...")
+        train_src: List[str] = self.read_raw_data(train_src_path)
+        train_tgt: List[str] = self.read_raw_data(train_tgt_path)
+        logging.info("Loading translation validation data...")
+        valid_src: List[str] = self.read_raw_data(valid_src_path)
+        valid_tgt: List[str] = self.read_raw_data(valid_tgt_path)
+        logging.info("Loading translation test data...")
+        test_src: List[str] = self.read_raw_data(test_src_path)
+        test_tgt: List[str] = self.read_raw_data(test_tgt_path)
+
+        if len(train_src) != len(train_tgt):
+            raise ValueError("Mismatch in number of training source and target sentences.")
+        if len(valid_src) != len(valid_tgt):
+            raise ValueError("Mismatch in number of validation source and target sentences.")
+        if len(test_src) != len(test_tgt):
+            raise ValueError("Mismatch in number of test source and target sentences.")
+
+        # Build a shared vocabulary from training data (source and target combined)
+        combined_train: List[str] = train_src + train_tgt
+        # Set default vocab size based on dataset name; use config or default values.
+        default_vocab_size: int = 37000 if self.dataset_name == "wmt14_en_de" else 32000 if self.dataset_name == "wmt14_en_fr" else 37000
+        vocab_size: int = self.dataset_config.get("vocab_size", default_vocab_size)
+        tokenization_type: str = self.dataset_config.get("tokenization", "Byte-Pair Encoding")
+        logging.info("Building vocabulary for translation data...")
+        self.vocab = self.build_vocab(combined_train, vocab_size)
+        logging.info(f"Vocabulary built with size: {len(self.vocab)}")
+
+        # Tokenize sentences (adding BOS and EOS markers for both source and target)
+        train_src_tokens = [self.tokenize_text(line, tokenization_type, self.vocab, add_special_tokens=True)
+                            for line in train_src]
+        train_tgt_tokens = [self.tokenize_text(line, tokenization_type, self.vocab, add_special_tokens=True)
+                            for line in train_tgt]
+        valid_src_tokens = [self.tokenize_text(line, tokenization_type, self.vocab, add_special_tokens=True)
+                            for line in valid_src]
+        valid_tgt_tokens = [self.tokenize_text(line, tokenization_type, self.vocab, add_special_tokens=True)
+                            for line in valid_tgt]
+        test_src_tokens = [self.tokenize_text(line, tokenization_type, self.vocab, add_special_tokens=True)
+                           for line in test_src]
+        test_tgt_tokens = [self.tokenize_text(line, tokenization_type, self.vocab, add_special_tokens=True)
+                           for line in test_tgt]
+
+        # Pair the source and target tokenized sentences
+        train_examples = list(zip(train_src_tokens, train_tgt_tokens))
+        valid_examples = list(zip(valid_src_tokens, valid_tgt_tokens))
+        test_examples = list(zip(test_src_tokens, test_tgt_tokens))
+
+        # Create batches using dynamic batching based on token counts.
+        batch_tokens: int = self.dataset_config.get("batch_tokens", 25000)
+        logging.info("Creating training batches for translation...")
+        train_batches = self.create_batches_pair(train_examples, batch_tokens, shuffle=True)
+        logging.info("Creating validation batches for translation...")
+        valid_batches = self.create_batches_pair(valid_examples, batch_tokens, shuffle=False)
+        logging.info("Creating test batches for translation...")
+        test_batches = self.create_batches_pair(test_examples, batch_tokens, shuffle=False)
+
+        return train_batches, valid_batches, test_batches
+
+    def _load_parsing_data(self) -> Tuple[Any, Any, Any]:
+        """Loads and preprocesses parsing data."""
+        # For parsing, assume file naming convention: e.g., 'wsj.train.txt', 'wsj.valid.txt', 'wsj.test.txt'
+        train_path: str = os.path.join("data", f"{self.dataset_name}.train.txt")
+        valid_path: str = os.path.join("data", f"{self.dataset_name}.valid.txt")
+        test_path: str = os.path.join("data", f"{self.dataset_name}.test.txt")
+
+        logging.info("Loading parsing training data...")
+        train_raw: List[str] = self.read_raw_data(train_path)
+        logging.info("Loading parsing validation data...")
+        valid_raw: List[str] = self.read_raw_data(valid_path)
+        logging.info("Loading parsing test data...")
+        test_raw: List[str] = self.read_raw_data(test_path)
+
+        vocab_size: int = self.dataset_config.get("vocab_size", 16000)
+        # For parsing, use default whitespace tokenization.
+        tokenization_type: str = "default"
+        logging.info("Building vocabulary for parsing data...")
+        self.vocab = self.build_vocab(train_raw, vocab_size)
+        logging.info(f"Vocabulary built with size: {len(self.vocab)}")
+
+        train_tokens = [self.tokenize_text(line, tokenization_type, self.vocab, add_special_tokens=True)
+                        for line in train_raw]
+        valid_tokens = [self.tokenize_text(line, tokenization_type, self.vocab, add_special_tokens=True)
+                        for line in valid_raw]
+        test_tokens = [self.tokenize_text(line, tokenization_type, self.vocab, add_special_tokens=True)
+                       for line in test_raw]
+
+        # Use dynamic batching based on token counts; if not specified, default to 25000 tokens.
+        batch_tokens: int = self.dataset_config.get("batch_tokens", 25000)
+        logging.info("Creating training batches for parsing...")
+        train_batches = self.create_batches_single(train_tokens, batch_tokens, shuffle=True)
+        logging.info("Creating validation batches for parsing...")
+        valid_batches = self.create_batches_single(valid_tokens, batch_tokens, shuffle=False)
+        logging.info("Creating test batches for parsing...")
+        test_batches = self.create_batches_single(test_tokens, batch_tokens, shuffle=False)
+
+        return train_batches, valid_batches, test_batches
+
+    @staticmethod
+    def read_raw_data(file_path: str) -> List[str]:
+        """
+        Reads raw data from a text file.
+        
+        Args:
+            file_path (str): Path to the text file.
+        
+        Returns:
+            List[str]: A list of non-empty, stripped lines.
+        
+        Raises:
+            FileNotFoundError: If the file does not exist.
+        """
+        if not os.path.isfile(file_path):
+            logging.error(f"File not found: {file_path}")
+            raise FileNotFoundError(f"File not found: {file_path}")
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        return lines
+
+    @staticmethod
+    def build_vocab(raw_data: List[str], vocab_size: int) -> Dict[str, int]:
+        """
+        Builds a vocabulary from raw text data by taking the most frequent tokens.
+        Special tokens (PAD, BOS, EOS, UNK) are pre-assigned with fixed indices.
+        
+        Args:
+            raw_data (List[str]): List of sentences.
+            vocab_size (int): Desired vocabulary size including special tokens.
+        
+        Returns:
+            Dict[str, int]: A mapping from tokens to their unique integer IDs.
+        """
+        counter: Counter = Counter()
+        for sentence in raw_data:
+            tokens = sentence.strip().split()
+            counter.update(tokens)
+        # Reserve slots for special tokens.
+        num_special: int = 4
+        most_common = counter.most_common(vocab_size - num_special)
+        vocab: Dict[str, int] = {
+            PAD_TOKEN: PAD_ID,
+            BOS_TOKEN: BOS_ID,
+            EOS_TOKEN: EOS_ID,
+            UNK_TOKEN: UNK_ID
+        }
+        index: int = num_special
+        for token, _ in most_common:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+        return vocab
+
+    @staticmethod
+    def tokenize_text(
+        text: str, tokenization_type: str, vocab: Dict[str, int], add_special_tokens: bool = True
+    ) -> List[int]:
+        """
+        Tokenizes a single text string into a list of token IDs.
+        For simulation purposes, this uses simple whitespace splitting.
+        
+        Args:
+            text (str): The input text string.
+            tokenization_type (str): Type of tokenization ("Byte-Pair Encoding", "Word-piece", or "default").
+            vocab (Dict[str, int]): The vocabulary mapping tokens to IDs.
+            add_special_tokens (bool): If True, add BOS and EOS tokens.
+        
+        Returns:
+            List[int]: List of token IDs.
+        """
+        # In a full implementation, tokenization would depend on the specified type.
+        tokens = text.strip().split()
+        if add_special_tokens:
+            tokens = [BOS_TOKEN] + tokens + [EOS_TOKEN]
+        token_ids: List[int] = [vocab.get(token, UNK_ID) for token in tokens]
+        return token_ids
+
+    @staticmethod
+    def pad_sequences(sequences: List[List[int]], pad_value: int = PAD_ID) -> torch.Tensor:
+        """
+        Pads a list of token ID sequences to the same length.
+        
+        Args:
+            sequences (List[List[int]]): List of token ID sequences.
+            pad_value (int): The token ID used for padding (default is PAD_ID).
+        
+        Returns:
+            torch.Tensor: A tensor of shape (batch_size, max_sequence_length).
+        """
+        if not sequences:
+            return torch.tensor([], dtype=torch.long)
+        max_length: int = max(len(seq) for seq in sequences)
+        padded_sequences: List[List[int]] = [
+            seq + [pad_value] * (max_length - len(seq)) for seq in sequences
+        ]
+        return torch.tensor(padded_sequences, dtype=torch.long)
+
+    @staticmethod
+    def create_batches_pair(
+        examples: List[Tuple[List[int], List[int]]], batch_tokens: int, shuffle: bool = False
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Creates dynamic batches for paired examples (source, target) based on a token budget.
+        
+        Args:
+            examples (List[Tuple[List[int], List[int]]]): List of (src_tokens, tgt_tokens) pairs.
+            batch_tokens (int): Approximate maximum number of tokens per side in a batch.
+            shuffle (bool): Whether to shuffle the examples before batching.
+        
+        Returns:
+            List[Tuple[torch.Tensor, torch.Tensor]]: List of batches as tuples of padded source and target tensors.
+        """
+        if shuffle:
+            random.shuffle(examples)
+
+        batches: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        current_batch: List[Tuple[List[int], List[int]]] = []
+        current_src_tokens: int = 0
+        current_tgt_tokens: int = 0
+
+        for src, tgt in examples:
+            len_src: int = len(src)
+            len_tgt: int = len(tgt)
+            # Finalize batch if adding the new example exceeds limits (and batch is not empty)
+            if current_batch and ((current_src_tokens + len_src > batch_tokens) or (current_tgt_tokens + len_tgt > batch_tokens)):
+                src_batch = DatasetLoader.pad_sequences([ex[0] for ex in current_batch], pad_value=PAD_ID)
+                tgt_batch = DatasetLoader.pad_sequences([ex[1] for ex in current_batch], pad_value=PAD_ID)
+                batches.append((src_batch, tgt_batch))
+                current_batch = []
+                current_src_tokens = 0
+                current_tgt_tokens = 0
+            current_batch.append((src, tgt))
+            current_src_tokens += len_src
+            current_tgt_tokens += len_tgt
+
+        if current_batch:
+            src_batch = DatasetLoader.pad_sequences([ex[0] for ex in current_batch], pad_value=PAD_ID)
+            tgt_batch = DatasetLoader.pad_sequences([ex[1] for ex in current_batch], pad_value=PAD_ID)
+            batches.append((src_batch, tgt_batch))
+
+        return batches
+
+    @staticmethod
+    def create_batches_single(
+        examples: List[List[int]], batch_tokens: int, shuffle: bool = False
+    ) -> List[torch.Tensor]:
+        """
+        Creates dynamic batches for single-sequence examples based on a token budget.
+        
+        Args:
+            examples (List[List[int]]): List of token ID sequences.
+            batch_tokens (int): Maximum number of tokens in the batch.
+            shuffle (bool): Whether to shuffle the examples before batching.
+        
+        Returns:
+            List[torch.Tensor]: List of padded batch tensors.
+        """
+        if shuffle:
+            random.shuffle(examples)
+
+        batches: List[torch.Tensor] = []
+        current_batch: List[List[int]] = []
+        current_tokens: int = 0
+
+        for seq in examples:
+            len_seq: int = len(seq)
+            if current_batch and (current_tokens + len_seq > batch_tokens):
+                batch_tensor = DatasetLoader.pad_sequences(current_batch, pad_value=PAD_ID)
+                batches.append(batch_tensor)
+                current_batch = []
+                current_tokens = 0
+            current_batch.append(seq)
+            current_tokens += len_seq
+
+        if current_batch:
+            batch_tensor = DatasetLoader.pad_sequences(current_batch, pad_value=PAD_ID)
+            batches.append(batch_tensor)
+
+        return batches

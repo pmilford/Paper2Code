@@ -1,0 +1,477 @@
+## Code: model.py
+```python
+"""
+model.py
+
+This module implements the TransformerModel class and its supporting submodules,
+faithfully reproducing the "Attention Is All You Need" architecture.
+
+The model includes:
+ - Shared token embeddings with scaling.
+ - Sinusoidal positional encodings.
+ - An encoder stack composed of EncoderLayer modules (each with multi-head self-attention and a feed-forward network).
+ - A decoder stack composed of DecoderLayer modules (with masked self-attention, encoder-decoder attention,
+   and a feed-forward network).
+ - A forward() method for training and a generate() method for auto-regressive inference (greedy decoding).
+
+Configuration parameters are read from a configuration dictionary (typically parsed from config.yaml).
+"""
+
+import math
+from typing import Optional, Dict, Any
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class PositionalEncoding(nn.Module):
+    """
+    Implements the sinusoidal positional encoding.
+    PE(pos, 2i) = sin(pos / (10000^(2i/d_model)))
+    PE(pos, 2i+1) = cos(pos / (10000^(2i/d_model)))
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
+        """
+        Args:
+            d_model (int): Model dimensionality.
+            dropout (float): Dropout rate.
+            max_len (int): Maximum length of sequences.
+        """
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Create constant 'pe' matrix with values dependent on
+        # position and i
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float32) *
+            (-math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        # Register pe as a buffer so that it is not updated during training.
+        self.register_buffer("pe", pe.unsqueeze(0))  # shape: (1, max_len, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Input embeddings of shape (batch_size, seq_len, d_model)
+        Returns:
+            torch.Tensor: Positionally encoded tensor.
+        """
+        seq_len = x.size(1)
+        x = x + self.pe[:, :seq_len, :]
+        return self.dropout(x)
+
+
+class MultiHeadAttention(nn.Module):
+    """
+    Implements multi-head attention mechanism.
+    Projects inputs to queries, keys, and values, splits these into multiple heads,
+    and performs scaled dot-product attention in parallel.
+    """
+
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1) -> None:
+        """
+        Args:
+            d_model (int): Total dimension of the model.
+            num_heads (int): Number of parallel attention heads.
+            dropout (float): Dropout rate on the attention weights.
+        """
+        super(MultiHeadAttention, self).__init__()
+        if d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+
+        self.linear_q = nn.Linear(d_model, d_model)
+        self.linear_k = nn.Linear(d_model, d_model)
+        self.linear_v = nn.Linear(d_model, d_model)
+
+        self.linear_out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            query (torch.Tensor): Query tensor of shape (batch_size, seq_len, d_model).
+            key (torch.Tensor): Key tensor of shape (batch_size, seq_len, d_model).
+            value (torch.Tensor): Value tensor of shape (batch_size, seq_len, d_model).
+            mask (Optional[torch.Tensor]): Mask tensor that prevents attention to certain positions.
+                Expected shape can be (batch_size, 1, seq_len, seq_len) or (seq_len, seq_len).
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
+        """
+        batch_size = query.size(0)
+
+        # Linear projections
+        Q = self.linear_q(query)  # (batch_size, seq_len, d_model)
+        K = self.linear_k(key)
+        V = self.linear_v(value)
+
+        # Split into multiple heads and transpose: from (batch, seq_len, d_model)
+        # to (batch, num_heads, seq_len, d_k)
+        Q = Q.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        K = K.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        V = V.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+
+        # Scaled dot-product attention.
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        if mask is not None:
+            # If mask is 2D, add batch and head dimensions.
+            if mask.dim() == 2:
+                mask = mask.unsqueeze(0).unsqueeze(0)  # shape: (1, 1, seq_len, seq_len)
+            elif mask.dim() == 3:
+                mask = mask.unsqueeze(1)  # assume shape becomes (batch_size, 1, seq_len, seq_len)
+            scores = scores.masked_fill(mask == 0, float("-1e9"))
+        attn = F.softmax(scores, dim=-1)
+        attn = self.dropout(attn)
+        context = torch.matmul(attn, V)  # (batch_size, num_heads, seq_len, d_k)
+
+        # Concatenate heads and put through final linear layer
+        context = context.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
+        output = self.linear_out(context)
+        return output
+
+
+class FeedForward(nn.Module):
+    """
+    Position-wise Feed-Forward Network.
+    Applies two linear transformations with a ReLU activation in between.
+    """
+
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1) -> None:
+        """
+        Args:
+            d_model (int): Model dimensionality.
+            d_ff (int): Inner-layer dimensionality of the feed-forward network.
+            dropout (float): Dropout rate.
+        """
+        super(FeedForward, self).__init__()
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(d_ff, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, d_model).
+        Returns:
+            torch.Tensor: Output tensor of same shape.
+        """
+        return self.linear2(self.dropout(self.relu(self.linear1(x))))
+
+
+class EncoderLayer(nn.Module):
+    """
+    Single layer of the Transformer encoder.
+    Consists of multi-head self-attention and a feed-forward network with residual connections and layer normalization.
+    """
+
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+        """
+        Args:
+            d_model (int): Model dimensionality.
+            num_heads (int): Number of attention heads.
+            d_ff (int): Inner-layer dimensionality of the feed-forward network.
+            dropout (float): Dropout rate.
+        """
+        super(EncoderLayer, self).__init__()
+        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.ff = FeedForward(d_model, d_ff, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, d_model).
+            mask (Optional[torch.Tensor]): Attention mask.
+        Returns:
+            torch.Tensor: Output tensor of same shape.
+        """
+        # Self-attention sub-layer with residual connection and norm.
+        attn_output = self.self_attn(x, x, x, mask)
+        x = self.norm1(x + self.dropout(attn_output))
+        # Feed-forward sub-layer with residual connection and norm.
+        ff_output = self.ff(x)
+        x = self.norm2(x + self.dropout(ff_output))
+        return x
+
+
+class Encoder(nn.Module):
+    """
+    Transformer Encoder composed of a stack of EncoderLayers.
+    """
+
+    def __init__(self, num_layers: int, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+        """
+        Args:
+            num_layers (int): Number of encoder layers.
+            d_model (int): Model dimensionality.
+            num_heads (int): Number of attention heads.
+            d_ff (int): Inner-layer dimensionality of the feed-forward network.
+            dropout (float): Dropout rate.
+        """
+        super(Encoder, self).__init__()
+        self.layers = nn.ModuleList(
+            [EncoderLayer(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)]
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, d_model).
+            mask (Optional[torch.Tensor]): Attention mask.
+        Returns:
+            torch.Tensor: Output tensor after processing by all layers.
+        """
+        for layer in self.layers:
+            x = layer(x, mask)
+        return self.norm(x)
+
+
+class DecoderLayer(nn.Module):
+    """
+    Single layer of the Transformer decoder.
+    Contains masked multi-head self-attention, encoder-decoder attention, and a feed-forward network,
+    each followed by residual connections and layer normalization.
+    """
+
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+        """
+        Args:
+            d_model (int): Model dimensionality.
+            num_heads (int): Number of attention heads.
+            d_ff (int): Inner-layer dimensionality of the feed-forward network.
+            dropout (float): Dropout rate.
+        """
+        super(DecoderLayer, self).__init__()
+        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.enc_dec_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.ff = FeedForward(d_model, d_ff, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        tgt_mask: Optional[torch.Tensor],
+        encoder_output: torch.Tensor,
+        src_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Decoder input tensor (batch_size, tgt_seq_len, d_model).
+            tgt_mask (Optional[torch.Tensor]): Mask for decoder self-attention.
+            encoder_output (torch.Tensor): Encoder outputs (batch_size, src_seq_len, d_model).
+            src_mask (Optional[torch.Tensor]): Mask for encoder-decoder attention.
+        Returns:
+            torch.Tensor: Output tensor after processing by this decoder layer.
+        """
+        # Masked self-attention in the decoder.
+        self_attn_output = self.self_attn(x, x, x, tgt_mask)
+        x = self.norm1(x + self.dropout(self_attn_output))
+        # Encoder-decoder attention.
+        enc_dec_attn_output = self.enc_dec_attn(x, encoder_output, encoder_output, src_mask)
+        x = self.norm2(x + self.dropout(enc_dec_attn_output))
+        # Feed-forward network.
+        ff_output = self.ff(x)
+        x = self.norm3(x + self.dropout(ff_output))
+        return x
+
+
+class Decoder(nn.Module):
+    """
+    Transformer Decoder composed of a stack of DecoderLayers.
+    """
+
+    def __init__(self, num_layers: int, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+        """
+        Args:
+            num_layers (int): Number of decoder layers.
+            d_model (int): Model dimensionality.
+            num_heads (int): Number of attention heads.
+            d_ff (int): Inner-layer dimensionality of the feed-forward network.
+            dropout (float): Dropout rate.
+        """
+        super(Decoder, self).__init__()
+        self.layers = nn.ModuleList(
+            [DecoderLayer(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)]
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        tgt_mask: Optional[torch.Tensor],
+        encoder_output: torch.Tensor,
+        src_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Decoder input tensor (batch_size, tgt_seq_len, d_model).
+            tgt_mask (Optional[torch.Tensor]): Mask for decoder self-attention.
+            encoder_output (torch.Tensor): Encoder outputs (batch_size, src_seq_len, d_model).
+            src_mask (Optional[torch.Tensor]): Mask for encoder-decoder attention.
+        Returns:
+            torch.Tensor: Decoder output tensor.
+        """
+        for layer in self.layers:
+            x = layer(x, tgt_mask, encoder_output, src_mask)
+        return self.norm(x)
+
+
+class TransformerModel(nn.Module):
+    """
+    Full Transformer model consisting of a shared embedding layer, encoder stack, decoder stack,
+    and a final linear projection with tied weights. Provides methods for forward pass and auto-regressive generation.
+    """
+
+    def __init__(self, params: Dict[str, Any]) -> None:
+        """
+        Initializes the Transformer model.
+        
+        Args:
+            params (Dict[str, Any]): Configuration parameters (parsed from config.yaml and additional keys).
+                Expected to include "model" and optionally "decoding" settings as well as "vocab_size".
+        """
+        super(TransformerModel, self).__init__()
+        model_config: Dict[str, Any] = params.get("model", {})
+        variant: str = model_config.get("variant", "base")
+        # Select variant configuration.
+        if variant == "big":
+            variant_config: Dict[str, Any] = model_config.get("big", {})
+        else:
+            variant_config = model_config.get("base", {})
+
+        self.d_model: int = variant_config.get("d_model", 512)
+        d_ff: int = variant_config.get("d_ff", 2048)
+        num_layers: int = variant_config.get("num_layers", 6)
+        num_heads: int = variant_config.get("num_heads", 8)
+        dropout: float = variant_config.get("dropout", 0.1)
+        self.label_smoothing: float = variant_config.get("label_smoothing", 0.1)
+
+        # Vocabulary size is provided externally; set default to 37000.
+        self.vocab_size: int = params.get("vocab_size", 37000)
+
+        # Maximum length offset for generation (e.g., for translation, max_length = input_length + offset).
+        if "decoding" in params and "translation" in params["decoding"]:
+            self.max_length_offset: int = params["decoding"]["translation"].get("max_length_offset", 50)
+        else:
+            self.max_length_offset = 50
+
+        # Shared token embedding layer.
+        self.embedding = nn.Embedding(self.vocab_size, self.d_model)
+        # Positional encoding.
+        self.pos_encoding = PositionalEncoding(self.d_model, dropout)
+        # Encoder and Decoder stacks.
+        self.encoder = Encoder(num_layers, self.d_model, num_heads, d_ff, dropout)
+        self.decoder = Decoder(num_layers, self.d_model, num_heads, d_ff, dropout)
+        # Final output projection.
+        self.output_linear = nn.Linear(self.d_model, self.vocab_size)
+        # Tie weights between output projection and embedding.
+        self.output_linear.weight = self.embedding.weight
+
+    def forward(
+        self,
+        src: torch.Tensor,
+        tgt: torch.Tensor,
+        src_mask: Optional[torch.Tensor],
+        tgt_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Performs a forward pass through the Transformer.
+        
+        Args:
+            src (torch.Tensor): Source sequences (batch_size, src_seq_len).
+            tgt (torch.Tensor): Target sequences (batch_size, tgt_seq_len).
+            src_mask (Optional[torch.Tensor]): Mask for source sequences.
+            tgt_mask (Optional[torch.Tensor]): Mask for target sequences.
+        Returns:
+            torch.Tensor: Logits of shape (batch_size, tgt_seq_len, vocab_size) before softmax.
+        """
+        # Embed and scale source tokens.
+        src_emb = self.embedding(src) * math.sqrt(self.d_model)
+        src_emb = self.pos_encoding(src_emb)
+        encoder_output = self.encoder(src_emb, src_mask)
+
+        # Embed and scale target tokens.
+        tgt_emb = self.embedding(tgt) * math.sqrt(self.d_model)
+        tgt_emb = self.pos_encoding(tgt_emb)
+        decoder_output = self.decoder(tgt_emb, tgt_mask, encoder_output, src_mask)
+        logits = self.output_linear(decoder_output)
+        return logits
+
+    def generate(self, src: torch.Tensor, src_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        Auto-regressive generation (greedy decoding).
+        
+        Args:
+            src (torch.Tensor): Source sequences (batch_size, src_seq_len).
+            src_mask (Optional[torch.Tensor]): Mask for source sequences.
+        Returns:
+            torch.Tensor: Generated target sequences (batch_size, generated_seq_len).
+        """
+        device = src.device
+        # Encode source once.
+        src_emb = self.embedding(src) * math.sqrt(self.d_model)
+        src_emb = self.pos_encoding(src_emb)
+        encoder_output = self.encoder(src_emb, src_mask)
+
+        batch_size = src.size(0)
+        BOS_ID: int = 1  # Beginning-of-sequence token (fixed ID)
+        EOS_ID: int = 2  # End-of-sequence token (fixed ID)
+        # Initialize target sequence with BOS token.
+        generated = torch.full((batch_size, 1), BOS_ID, dtype=torch.long, device=device)
+        max_length = src.size(1) + self.max_length_offset
+
+        for _ in range(max_length - 1):
+            # Generate subsequent mask for current target sequence.
+            tgt_mask = self.generate_square_subsequent_mask(generated.size(1)).to(device)
+            # Embed target tokens.
+            tgt_emb = self.embedding(generated) * math.sqrt(self.d_model)
+            tgt_emb = self.pos_encoding(tgt_emb)
+            # Decode.
+            decoder_output = self.decoder(tgt_emb, tgt_mask, encoder_output, src_mask)
+            # Get logits for the last token position.
+            logits = self.output_linear(decoder_output[:, -1, :])  # (batch_size, vocab_size)
+            # Greedy decoding: select the token with the highest probability.
+            next_tokens = torch.argmax(F.log_softmax(logits, dim=-1), dim=-1).unsqueeze(1)
+            generated = torch.cat([generated, next_tokens], dim=1)
+            # If all sequences have generated EOS, stop early.
+            if (next_tokens == EOS_ID).all():
+                break
+
+        return generated
+
+    @staticmethod
+    def generate_square_subsequent_mask(sz: int) -> torch.Tensor:
+        """
+        Generates a square subsequent mask to prevent attention to future tokens.
+        
+        Args:
+            sz (int): Size of the mask (sequence length).
+        Returns:
+            torch.Tensor: A boolean mask tensor of shape (sz, sz) where True indicates allowed positions.
+        """
+        # Create an upper-triangular matrix with ones above the diagonal.
+        mask = torch.triu(torch.ones((sz, sz), dtype=torch.bool), diagonal=1)
+        # Invert mask: allowed positions are True.
+        return ~mask
+```

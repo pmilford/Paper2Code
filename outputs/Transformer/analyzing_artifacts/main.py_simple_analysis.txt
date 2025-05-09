@@ -1,0 +1,119 @@
+Below is a detailed logic analysis for main.py that explains how the entry‐point script should work. This analysis explains how main.py will load the configuration, instantiate the necessary modules (DatasetLoader, TransformerModel, Trainer, and Evaluator), and manage the overall workflow. All design decisions strictly follow the plan, paper, and config.yaml settings.
+
+──────────────────────────────
+1. Load Configuration
+
+• At the very beginning, main.py will read the configuration from config.yaml using PyYAML.  
+• The configuration dict will include sections for:
+  – training (total_steps, warmup_steps, learning rate formula, optimizer parameters)  
+  – model (including the variant option “base” or “big” with its specific parameters, such as d_model, d_ff, num_layers, num_heads, dropout, label_smoothing)  
+  – data (dataset details for translation and parsing, vocabulary sizes, tokenization type, batch token counts)  
+  – decoding (beam search settings such as beam_size, length_penalty, and max_length_offset for translation and parsing)  
+  – checkpoint (save_interval_steps, and number of checkpoints to average at the end)  
+  – logging (log_interval_steps)
+
+It is important that all subsequent module initializations refer exclusively to the values provided in this configuration.
+
+──────────────────────────────
+2. Initialize Data Pipeline
+
+• Create an instance of the DatasetLoader class using the loaded configuration.  
+• Call DatasetLoader.load_data() to obtain the training and evaluation datasets.  
+  – For example, if the experiment is for machine translation, the loader will apply either BPE (for WMT 2014 EN-DE) or word-piece tokenization (for EN-FR) as defined in config.data.  
+  – The loader will also handle batching by approximate sequence length with the target batch_tokens value (25000 for source and target).
+
+• The returned tuple (train_data, eval_data) will be later passed to both the Trainer and Evaluator modules.
+
+──────────────────────────────
+3. Instantiate the Transformer Model
+
+• Check the model.variant setting in the configuration (either “base” or “big”).  
+• According to the selected variant, extract the parameters for:
+  – d_model (e.g., 512 for base, 1024 for big)
+  – d_ff (e.g., 2048 for base, 4096 for big)
+  – num_layers (6 for both variants, as per the paper)
+  – num_heads (8 for base, 16 for big)
+  – dropout and label smoothing values
+
+• Instantiate the TransformerModel class (from model.py) by passing these parameters in a dict (or using a structured configuration).  
+• The model is implemented following the design:
+  – Encoder and decoder stacks with multi-head self-attention, masking in the decoder, and layer normalization with residual connections.
+  – Sinusoidal positional encoding is applied over the token embeddings (and the embedding weights are shared with the pre-softmax linear projection).
+
+──────────────────────────────
+4. Initialize the Trainer
+
+• Instantiate the Trainer class (from trainer.py) by passing:
+  – the TransformerModel instance,
+  – the training data (train_data loaded earlier),
+  – and the training-specific configuration parameters (total_steps, warmup_steps, optimizer settings, learning rate schedule formula, dropout, label smoothing, etc.).
+
+• The Trainer will:
+  – Build the Adam optimizer with β1 = 0.9, β2 = 0.98, and ϵ = 1e-9.
+  – Implement the custom learning rate schedule based on the formula:
+         learning_rate = d_model^(–0.5) * min(step^(–0.5), step * warmup_steps^(–1.5))
+  – Handle the training loop that includes forward passes, loss computation (with label smoothing), backward passes and parameter updates.
+  – Save checkpoints periodically (according to the checkpoint.save_interval_steps setting) and log progress every log_interval_steps.
+  – Optionally, the Trainer module can support loading previous checkpoints (using load_checkpoint) and will eventually handle checkpoint averaging using either the base_model_last_checkpoints or big_model_last_checkpoints based on the model variant.
+
+──────────────────────────────
+5. Run Training
+
+• Call Trainer.train() which will:
+  – Loop over the training batches, update the model, and log training metrics.
+  – Monitor training steps up to total_steps (e.g., 100,000 for base model as set in config.training.total_steps).
+  – Save checkpoints periodically based on the configuration.
+
+• After training is complete, training-related status and final checkpoint-saving will be logged.
+
+──────────────────────────────
+6. Initialize the Evaluator
+
+• Once training is finished, instantiate the Evaluator class (from evaluation.py) with:
+  – The TransformerModel instance (now trained),
+  – The evaluation data returned by DatasetLoader.load_data(), and
+  – The decoding settings from the configuration (e.g., for translation: beam_size = 4, length_penalty = 0.6, max_length_offset = 50; for parsing these values come from their section).
+  
+• The Evaluator will:
+  – Use the model.generate() method (which internally calls beam_search) to perform inference on each sample.
+  – Apply the beam search decoding routine that respects the provided beam size, length penalty, and maximum output length (computed as input_length plus max_length_offset).
+  – Compute evaluation metrics. For machine translation this is BLEU (using newstest sets); for constituency parsing, compute F1 scores.
+
+──────────────────────────────
+7. Run Evaluation and Report Results
+
+• Call Evaluator.evaluate() to generate predictions and compare them against the ground truth.
+• Retrieve the computed evaluation metrics (a dictionary, for instance) and log or print these results.
+• These results should approximately match the reported scores in the paper (e.g., BLEU scores for the base model on WMT 2014 EN-DE/EN-FR or F1 scores for parsing).
+
+──────────────────────────────
+8. (Optional) Handle Experiment Modes
+
+• Although not strictly required, main.py may support modes (e.g., “train”, “evaluate”, or “inference”) based on command-line arguments.  
+• This would allow users to run only training if desired, or skip training and load an already trained checkpoint before evaluation.
+• All such decisions must adhere to the configuration details from config.yaml.
+
+──────────────────────────────
+9. Logging and Checkpoint Management
+
+• Throughout main.py, logging should be set up (using either Python’s logging module or print statements) to indicate:
+  – When configuration is loaded.
+  – When data is successfully loaded.
+  – Progress of training (with steps logging every config.logging.log_interval_steps).
+  – When checkpoints are saved (referring to config.checkpoint settings).
+  – The start and completion of evaluation along with the final metric scores.
+  
+• Ensure that all checkpoints and log outputs are stored or printed so that the experiments are reproducible and debuggable.
+
+──────────────────────────────
+Summary
+
+The main.py script is responsible for orchestrating the entire experiment:
+1. Load configuration from config.yaml.
+2. Instantiate DatasetLoader and load train/eval datasets.
+3. Create a TransformerModel instance based on the “base” or “big” configuration.
+4. Initialize Trainer with the model and training data, and run the training loop (including checkpoint saving).
+5. After training, initialize Evaluator with the model and evaluation data, run beam search decoding and evaluation.
+6. Finally, print/log the evaluation metrics.
+
+This logic analysis ensures that the workflow strictly follows the design and experimental details as described in “Attention Is All You Need” and adheres to the configuration and design contracts defined earlier.

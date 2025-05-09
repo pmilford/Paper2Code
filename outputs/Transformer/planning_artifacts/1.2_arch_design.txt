@@ -1,0 +1,78 @@
+----------------------------------------
+[Implementation approach]
+We will build a modular system using PyTorch as the deep learning framework along with standard open-source libraries such as NumPy, PyYAML for configuration, and optionally HuggingFace Datasets or torchtext for data handling. The Transformer architecture (encoder-decoder with multi-head self-attention, position-wise feedforward, and sinusoidal positional encoding) will be implemented in a modular fashion. Training will be managed through a dedicated Trainer module that handles the Adam optimizer with a custom learning rate schedule, dropout, and label smoothing. Evaluation will include beam search decoding and metrics computation (e.g., BLEU for MT and F1 for parsing). The entire system is orchestrated by a main entry script (main.py) and configurations will be loaded via a YAML file.
+
+----------------------------------------
+[File list]
+- main.py
+- dataset_loader.py
+- model.py
+- trainer.py
+- evaluation.py
+- config.yaml
+
+----------------------------------------
+[Data structures and interfaces]
+```mermaid
+classDiagram
+    class Main {
+        +__init__(config: dict)
+        +run_experiment() -> None
+    }
+    class DatasetLoader {
+        +__init__(config: dict)
+        +load_data() -> tuple
+    }
+    class TransformerModel {
+        +__init__(params: dict)
+        +forward(src: Tensor, tgt: Tensor, src_mask: Tensor, tgt_mask: Tensor) -> Tensor
+        +generate(src: Tensor, src_mask: Tensor) -> Tensor
+    }
+    class Trainer {
+        +__init__(model: TransformerModel, train_data: any, config: dict)
+        +train() -> None
+        +save_checkpoint() -> None
+        +load_checkpoint(path: str) -> None
+    }
+    class Evaluator {
+        +__init__(model: TransformerModel, eval_data: any, config: dict)
+        +evaluate() -> dict
+        +beam_search(src: Tensor, src_mask: Tensor) -> Tensor
+    }
+    Main --> DatasetLoader : uses
+    Main --> TransformerModel : creates
+    Main --> Trainer : manages
+    Main --> Evaluator : manages
+    Trainer --> TransformerModel : trains
+    Evaluator --> TransformerModel : evaluates
+```
+
+----------------------------------------
+[Program call flow]
+```mermaid
+sequenceDiagram
+    participant M as Main
+    participant DL as DatasetLoader
+    participant TM as TransformerModel
+    participant TR as Trainer
+    participant EV as Evaluator
+
+    M->>DL: __init__(config) and load_data()
+    DL-->>M: return (train_data, eval_data)
+    M->>TM: __init__(params) to create model instance
+    M->>TR: __init__(model, train_data, config)
+    TR->>TM: run training steps (forward, loss, backpropagation)
+    TM-->>TR: output predictions and loss
+    TR->>TR: save checkpoints periodically
+    TR-->>M: training complete
+    M->>EV: __init__(model, eval_data, config)
+    EV->>TM: run beam_search(src, src_mask) for each sample
+    TM-->>EV: return generated predictions
+    EV->>EV: compute evaluation metrics (BLEU, F1, etc.)
+    EV-->>M: output evaluation metrics
+```
+
+----------------------------------------
+[Anything UNCLEAR]
+Clarification is needed regarding the exact dataset formats and preprocessing steps for the WMT 2014 and Penn Treebank datasets (e.g., file types, tokenization settings) as well as the detailed configuration of the beam search algorithm (scoring details, handling of length normalization beyond the provided penalties).
+

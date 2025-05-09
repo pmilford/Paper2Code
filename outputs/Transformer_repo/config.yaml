@@ -1,0 +1,61 @@
+## config.yaml
+training:
+  total_steps: 100000  # For base model; use 300000 for big model training in MT experiments
+  warmup_steps: 4000
+  learning_rate_formula: "d_model^-0.5 * min(step^-0.5, step * warmup_steps^-1.5)"
+  optimizer:
+    type: "Adam"
+    beta1: 0.9
+    beta2: 0.98
+    epsilon: 1e-9
+
+model:
+  variant: "base"  # Options: "base" or "big"
+  base:
+    d_model: 512
+    d_ff: 2048
+    num_layers: 6
+    num_heads: 8
+    dropout: 0.1
+    label_smoothing: 0.1
+  big:
+    d_model: 1024
+    d_ff: 4096
+    num_layers: 6
+    num_heads: 16
+    dropout: 0.3
+    label_smoothing: 0.1
+
+data:
+  translation:
+    wmt14_en_de:
+      vocab_size: 37000
+      tokenization: "Byte-Pair Encoding"
+      batch_tokens: 25000  # Approximate source tokens per batch (same for target)
+    wmt14_en_fr:
+      vocab_size: 32000
+      tokenization: "Word-piece"
+      batch_tokens: 25000
+  parsing:
+    wsj:
+      vocab_size: 16000
+    semi_supervised:
+      vocab_size: 32000
+
+decoding:
+  translation:
+    beam_size: 4
+    length_penalty: 0.6
+    max_length_offset: 50  # Maximum output length is input_length + 50
+  parsing:
+    beam_size: 21
+    length_penalty: 0.3
+    max_length_offset: 300  # Maximum output length is input_length + 300
+
+checkpoint:
+  save_interval_steps: 1000
+  base_model_last_checkpoints: 5
+  big_model_last_checkpoints: 20
+
+logging:
+  log_interval_steps: 100

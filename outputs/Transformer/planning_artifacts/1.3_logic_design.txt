@@ -1,0 +1,40 @@
+----------------------------------------
+[Required packages]
+- numpy==1.21.0
+- torch==1.9.0
+- PyYAML==5.4.1
+- tqdm==4.62.3
+
+----------------------------------------
+[Required Other language third-party packages]
+- No third-party dependencies required
+
+----------------------------------------
+[Logic Analysis]
+- ['dataset_loader.py', 'Defines a DatasetLoader class responsible for loading and preprocessing datasets. This includes handling tokenization (e.g., Byte-Pair Encoding for WMT 2014 and word-piece tokenization for English-French), batching data by approximate sequence length, and returning train, validation, and test splits. It parses configuration parameters from config.yaml and may use torchtext or HuggingFace Datasets for data handling.']
+- ['model.py', "Defines the TransformerModel class which builds the Transformer architecture as described in the paper. It includes implementations for encoder and decoder stacks, multi-head attention (with scaled dot-product attention), positional encodings (sinusoidal and optionally learned), and position-wise feed-forward networks. This module depends on PyTorch's torch.nn modules and uses configuration parameters (such as d_model, d_ff, number of heads, number of layers) from config.yaml."]
+- ['trainer.py', 'Defines the Trainer class that manages the training process. This includes constructing the optimizer (Adam with β1=0.9, β2=0.98, ϵ=10^-9), implementing a custom learning rate scheduler with warmup_steps (e.g., 4000), handling dropout and label smoothing, running the training loop (forward pass, loss computation, backpropagation), checkpointing (saving and loading weights), and logging training metrics. It depends on the TransformerModel from model.py and the data loaded via dataset_loader.py.']
+- ['evaluation.py', 'Defines the Evaluator class for model inference and evaluation. This module implements beam search decoding (with options for beam size, length penalty, and maximum output length) and evaluation metrics such as BLEU for translation tasks and F1 scores for constituency parsing. It calls model.forward() and model.generate() from model.py, and analyzes predictions against ground truth labels provided from dataset_loader.py.']
+- ['main.py', 'Acts as the entry point of the application. It loads configuration from config.yaml, instantiates the DatasetLoader to process data, creates an instance of the TransformerModel, and initializes Trainer and Evaluator objects. It organizes the workflow: data loading, model training, checkpointing, and final evaluation, ensuring that the modules interact as per the design.']
+
+----------------------------------------
+[Task list]
+- dataset_loader.py
+- model.py
+- trainer.py
+- evaluation.py
+- main.py
+- config.yaml
+
+----------------------------------------
+[Full API spec]
+
+
+----------------------------------------
+[Shared Knowledge]
+Common utilities include configuration parsing using PyYAML, a shared logging mechanism for tracking training and evaluation metrics, and utility functions for tokenization, mask creation (for attention), and checkpoint management. These functions will be imported and reused across dataset_loader.py, trainer.py, and evaluation.py to maintain consistency.
+
+----------------------------------------
+[Anything UNCLEAR]
+Clarification needed on specific tokenization parameters (e.g., BPE merge operations or vocabulary size details for each dataset) as well as the internal details of beam search (e.g., exact scoring and length normalization formulas) and evaluation metrics computation (especially for F1 in constituency parsing).
+

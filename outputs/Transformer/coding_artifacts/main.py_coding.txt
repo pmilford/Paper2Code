@@ -1,0 +1,134 @@
+```python
+"""main.py
+
+Entry-point script for training and evaluating the Transformer model 
+as described in "Attention Is All You Need". This script loads the configuration,
+initializes the data pipeline via DatasetLoader, instantiates the TransformerModel,
+sets up the Trainer and Evaluator, and orchestrates the overall workflow.
+"""
+
+import argparse
+import logging
+import os
+import yaml
+
+from dataset_loader import DatasetLoader
+from model import TransformerModel
+from trainer import Trainer
+from evaluation import Evaluator
+
+
+def load_config(config_path: str = "config.yaml") -> dict:
+    """
+    Loads and returns the configuration from a YAML file.
+    
+    Args:
+        config_path (str): Path to the YAML configuration file.
+        
+    Returns:
+        dict: Configuration dictionary.
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    return config
+
+
+def setup_logging() -> None:
+    """
+    Sets up logging configuration.
+    """
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        level=logging.INFO
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    """
+    Parses command-line arguments.
+    
+    Returns:
+        argparse.Namespace: Parsed command-line options.
+    """
+    parser = argparse.ArgumentParser(description="Transformer Training and Evaluation")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="train",
+        choices=["train", "eval"],
+        help="Experiment mode: 'train' to train the model, 'eval' to evaluate a checkpoint."
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to the checkpoint file for evaluation (required for eval mode)."
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    """
+    Main function to orchestrate loading configuration, data, model instantiation,
+    training, and evaluation.
+    """
+    # Parse command-line arguments and setup logging.
+    args = parse_args()
+    setup_logging()
+    logging.info("Starting experiment...")
+
+    # Load configuration from config.yaml
+    config_path: str = "config.yaml"
+    config: dict = load_config(config_path)
+    logging.info("Configuration loaded successfully.")
+
+    # Initialize the data pipeline using DatasetLoader.
+    dataset_loader_instance = DatasetLoader(config)
+    train_data, valid_data, test_data = dataset_loader_instance.load_data()
+    logging.info(
+        "Data loaded: %d training batches, %d validation batches, %d test batches",
+        len(train_data), len(valid_data), len(test_data)
+    )
+
+    # Set vocabulary size in the configuration from the loaded vocabulary.
+    vocab_size: int = len(dataset_loader_instance.vocab)
+    config["vocab_size"] = vocab_size
+    logging.info("Vocabulary size set to %d", vocab_size)
+
+    # Instantiate the Transformer model.
+    model = TransformerModel(config)
+    logging.info("Transformer model instantiated.")
+
+    # If evaluation mode and a checkpoint is provided, load the checkpoint.
+    if args.mode == "eval":
+        if args.checkpoint is not None:
+            # Create a Trainer instance solely to load the checkpoint.
+            trainer_instance = Trainer(model, train_data, config)
+            trainer_instance.load_checkpoint(args.checkpoint)
+            logging.info("Loaded checkpoint from %s", args.checkpoint)
+        else:
+            logging.info("No checkpoint provided for eval mode; using current model parameters.")
+    # In training mode, run training.
+    elif args.mode == "train":
+        trainer_instance = Trainer(model, train_data, config)
+        logging.info("Beginning training...")
+        trainer_instance.train()
+        logging.info("Training complete.")
+
+    # Instantiate the Evaluator with the model and validation data.
+    evaluator_instance = Evaluator(model, valid_data, config)
+    logging.info("Starting evaluation...")
+    metrics: dict = evaluator_instance.evaluate()
+    logging.info("Evaluation complete. Metrics: %s", metrics)
+
+    # Print final evaluation metrics.
+    print("\nFinal Evaluation Metrics:")
+    for metric_name, metric_value in metrics.items():
+        print(f"{metric_name}: {metric_value:.2f}")
+
+
+if __name__ == "__main__":
+    main()
+```
