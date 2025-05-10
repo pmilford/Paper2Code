@@ -1,13 +1,13 @@
 # export OPENAI_API_KEY=""
 
-GPT_VERSION="o3-mini"
+GPT_VERSION="o4-mini"
 
 PAPER_NAME="aiscientistv2"
 PDF_PATH="../examples/aiscientistv2.pdf" # .pdf
 PDF_JSON_PATH="../examples/aiscientistv2.json" # .json
-PDF_JSON_CLEANED_PATH="../examples/aiscientistv2_cleaned.json" # _cleaned.json
-OUTPUT_DIR="../outputs/aiscientistv2"
-OUTPUT_REPO_DIR="../outputs/aiscientistv2_repo"
+PDF_JSON_CLEANED_PATH="../examples/aiscientistv2b_cleaned.json" # _cleaned.json
+OUTPUT_DIR="../outputs/aiscientistv2b"
+OUTPUT_REPO_DIR="../outputs/aiscientistv2b_repo"
 
 mkdir -p $OUTPUT_DIR
 mkdir -p $OUTPUT_REPO_DIR
