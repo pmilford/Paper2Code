@@ -1,0 +1,43 @@
+## config.yaml
+training:
+  compositional_reg:
+    optimizer: "Adam"
+    learning_rate: 0.001
+    epochs: 30
+    batch_size: 32
+    regularization_weight: 0.1
+    loss_function: "MSE + λ * compositional_loss"
+    
+  label_noise:
+    optimizer: "SGD with momentum"
+    learning_rate: 0.1
+    lr_decay_factor: 0.1
+    lr_decay_epochs: [50, 75]
+    epochs: 100
+    batch_size: 128
+    loss_function: "CrossEntropy"
+    
+  pest_detection:
+    optimizer: "Adam"
+    learning_rate_grid: [1e-4, 5e-4, 1e-3, 5e-3, 1e-2]
+    grid_epochs: 10
+    final_epochs: 30
+    batch_size: 32
+    loss_function: "CrossEntropy"
+
+experiment_manager:
+  debug_probability: 1.0
+  max_debug_depth: 3
+  max_runtime_per_node: "1h"
+  node_allocation:
+    stage1: 21
+    stage2: 12
+    stage3: 12
+    stage4: 12
+
+general:
+  random_seed: 42
+  data_split:
+    train: 0.7
+    validation: 0.15
+    test: 0.15

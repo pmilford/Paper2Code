@@ -1,0 +1,392 @@
+```python
+"""
+experiment_manager.py
+
+This module implements the ExperimentManager class which coordinates the entire experiment
+lifecycle using an agentic tree search framework. It spawns multiple experimental nodes per stage,
+evaluates their performance, applies automatic debugging for buggy nodes (using a maximum debug depth),
+selects the best node based on evaluation metrics, and replicates the best performing node for reproducibility.
+The stages include:
+    • Stage 1: Preliminary Investigation
+    • Stage 2: Hyperparameter Tuning
+    • Stage 3: Research Agenda Execution
+    • Stage 4: Ablation Studies
+
+Each node is represented as a dictionary containing its configuration, runtime metrics, error logs,
+status (non-buggy or buggy), and output artifacts. The ExperimentManager uses parallel processing
+to run nodes concurrently and aggregates results to choose the best node that seeds the next stage.
+
+Configuration values (such as debug probability, maximum debug depth, node allocation per stage, etc.)
+are retrieved from config.yaml.
+
+Author: [Your Name]
+Date: [Date]
+"""
+
+import os
+import copy
+import time
+import random
+import logging
+import concurrent.futures
+from typing import Any, Dict, List, Callable, Optional
+
+import numpy as np
+
+# Import modules from the project (make sure these files are in the same directory)
+from dataset_loader import DatasetLoader
+from model import LSTMModel, ResNet18Model
+from trainer import Trainer
+from evaluation import Evaluation
+
+# Set up basic logging configuration
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+
+
+class ExperimentManager:
+    """
+    ExperimentManager orchestrates the experiment lifecycle across multiple stages using
+    a tree search–based framework. It allows experiments to be added and then executes them
+    in sequential stages, each spawning a predetermined number of nodes. Buggy nodes will be
+    automatically re-run (debugged) if they have not reached the maximum debug depth. After
+    each stage, the best-performing node is selected and then replicated to obtain statistical
+    metrics. The best node configuration is passed to the next stage.
+    
+    Methods:
+      - __init__(config: dict): Initialize with configuration.
+      - add_experiment(name: str, experiment_callable: Callable) -> None: Add an experiment candidate.
+      - run_experiments() -> List[dict]: Run and aggregate results from all experiments.
+    """
+
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """
+        Initialize the ExperimentManager.
+        
+        Args:
+            config (Dict[str, Any]): Configuration dictionary (from config.yaml).
+        """
+        self.config: Dict[str, Any] = config
+        self.experiments: Dict[str, Callable] = {}
+        # Retrieve experiment_manager parameters with defaults.
+        exp_manager_conf: Dict[str, Any] = self.config.get("experiment_manager", {})
+        self.debug_probability: float = exp_manager_conf.get("debug_probability", 1.0)
+        self.max_debug_depth: int = exp_manager_conf.get("max_debug_depth", 3)
+        self.max_runtime: str = exp_manager_conf.get("max_runtime_per_node", "1h")
+        self.node_allocation: Dict[str, int] = exp_manager_conf.get(
+            "node_allocation", {"stage1": 21, "stage2": 12, "stage3": 12, "stage4": 12}
+        )
+        # Define the sequential stage order.
+        self.stages: List[str] = ["stage1", "stage2", "stage3", "stage4"]
+
+        # Set global randomness.
+        general_conf: Dict[str, Any] = self.config.get("general", {})
+        global_seed: int = general_conf.get("random_seed", 42)
+        random.seed(global_seed)
+        np.random.seed(global_seed)
+
+        logging.info(f"ExperimentManager initialized with config: debug_probability={self.debug_probability}, "
+                     f"max_debug_depth={self.max_debug_depth}, node_allocation={self.node_allocation}")
+
+    def add_experiment(self, name: str, experiment_callable: Callable) -> None:
+        """
+        Add an experiment to be run by the manager.
+        
+        Args:
+            name (str): Name of the experiment.
+            experiment_callable (Callable): A callable that accepts a node configuration and
+                                            returns a dictionary with keys:
+                                              - "status": "non-buggy" or "buggy"
+                                              - "metrics": Dict[str, Any]
+                                              - "error_log": Optional[str]
+                                              - Optionally, other output artifacts.
+        """
+        self.experiments[name] = experiment_callable
+        logging.info(f"Experiment '{name}' added to the manager.")
+
+    def run_experiments(self) -> List[Dict[str, Any]]:
+        """
+        Run all added experiments sequentially across all stages. For each experiment, the best node
+        from each stage is used as the parent configuration for the next stage. Finally, the best node
+        from the final stage is replicated (multiple runs) to obtain mean and standard deviation of key metrics.
+        
+        Returns:
+            List[Dict[str, Any]]: Aggregated results per experiment.
+        """
+        aggregated_results: List[Dict[str, Any]] = []
+        # Loop over each added experiment.
+        for exp_name, exp_callable in self.experiments.items():
+            logging.info(f"Starting experiment: {exp_name}")
+            # Initial parent configuration may be empty or predefined.
+            parent_config: Dict[str, Any] = {}
+            stage_results: Dict[str, Any] = {"experiment": exp_name, "stages": {}}
+            # Iterate over each stage.
+            for stage in self.stages:
+                logging.info(f"Starting stage {stage} for experiment '{exp_name}'")
+                stage_result: Dict[str, Any] = self._run_stage(stage, parent_config, exp_callable)
+                stage_results["stages"][stage] = stage_result
+                # Use the best node's configuration from current stage as the parent for the next stage.
+                parent_config = stage_result.get("best_node", {}).get("node_config", {})
+            # Replicate the best node from the final stage for robust metrics.
+            final_stage: str = self.stages[-1]
+            best_node_final: Dict[str, Any] = stage_results["stages"][final_stage].get("best_node", {})
+            if best_node_final:
+                replication_result: Dict[str, Any] = self._replicate_node(best_node_final, exp_callable, n_replications=3)
+                stage_results["final_replication"] = replication_result
+            aggregated_results.append(stage_results)
+        return aggregated_results
+
+    def _run_stage(self, stage: str, parent_config: Dict[str, Any], experiment_callable: Callable) -> Dict[str, Any]:
+        """
+        Run a single stage with multiple experimental nodes in parallel.
+        
+        Args:
+            stage (str): Stage identifier (e.g., "stage1").
+            parent_config (Dict[str, Any]): Configuration inherited from the previous stage.
+            experiment_callable (Callable): The function that executes an experiment node.
+        
+        Returns:
+            Dict[str, Any]: A dictionary containing node results and the selected best node.
+        """
+        node_count: int = self.node_allocation.get(stage, 12)
+        nodes_results: List[Dict[str, Any]] = []
+        node_configs: List[Dict[str, Any]] = []
+
+        # Generate node configuration for each node.
+        for i in range(node_count):
+            node_config: Dict[str, Any] = copy.deepcopy(parent_config)
+            node_config["stage"] = stage
+            node_config["node_id"] = f"{stage}_node_{i+1}"
+            node_config["debug_depth"] = 0
+            node_config["seed"] = random.randint(0, 10000)
+            node_configs.append(node_config)
+
+        logging.info(f"Spawning {node_count} nodes in stage '{stage}'.")
+        # Execute nodes in parallel.
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            future_to_node = {executor.submit(self._run_node, nc, experiment_callable): nc for nc in node_configs}
+            for future in concurrent.futures.as_completed(future_to_node):
+                try:
+                    node_result: Dict[str, Any] = future.result(timeout=3600)  # 1 hour timeout per node.
+                    nodes_results.append(node_result)
+                    logging.info(f"Node '{node_result.get('node_id', 'unknown')}' finished with status: {node_result.get('status')}.")
+                except Exception as exc:
+                    nc = future_to_node[future]
+                    error_message = f"Node '{nc.get('node_id')}' failed with exception: {exc}"
+                    logging.error(error_message)
+                    nodes_results.append({
+                        "node_id": nc.get("node_id"),
+                        "stage": stage,
+                        "debug_depth": nc.get("debug_depth", 0),
+                        "status": "buggy",
+                        "error_log": str(exc),
+                        "metrics": {},
+                        "node_config": nc
+                    })
+
+        # Check if any node is buggy and attempt debug branching if applicable.
+        for node in nodes_results:
+            if node.get("status") == "buggy":
+                current_depth: int = node.get("debug_depth", 0)
+                if current_depth < self.max_debug_depth and random.random() < self.debug_probability:
+                    logging.info(f"Node '{node.get('node_id')}' is buggy; attempting debug (depth {current_depth}).")
+                    debug_result = self._debug_node(node, experiment_callable)
+                    nodes_results.append(debug_result)
+
+        # Select the best node from all node results.
+        best_node: Dict[str, Any] = self._select_best_node(nodes_results)
+        stage_summary: Dict[str, Any] = {
+            "nodes_executed": len(nodes_results),
+            "nodes_results": nodes_results,
+            "best_node": best_node
+        }
+        return stage_summary
+
+    def _run_node(self, node_config: Dict[str, Any], experiment_callable: Callable) -> Dict[str, Any]:
+        """
+        Run a single experimental node by calling the experiment_callable with the given configuration.
+        
+        Args:
+            node_config (Dict[str, Any]): The configuration dictionary for this node.
+            experiment_callable (Callable): The experiment function to run.
+        
+        Returns:
+            Dict[str, Any]: A dictionary containing the node's results including status, metrics,
+                            error logs, and the configuration used.
+        """
+        try:
+            # Ensure reproducibility by setting the random seed.
+            seed: int = node_config.get("seed", 42)
+            random.seed(seed)
+            np.random.seed(seed)
+            # Execute the experiment callable.
+            result: Dict[str, Any] = experiment_callable(node_config)
+            # Ensure the result contains the node configuration and node_id.
+            result["node_config"] = node_config
+            result["node_id"] = node_config.get("node_id", "unknown")
+            if "status" not in result:
+                result["status"] = "non-buggy"
+            return result
+        except Exception as e:
+            logging.error(f"Error in node '{node_config.get('node_id', 'unknown')}': {e}")
+            return {
+                "node_id": node_config.get("node_id", "unknown"),
+                "stage": node_config.get("stage", "unknown"),
+                "debug_depth": node_config.get("debug_depth", 0),
+                "status": "buggy",
+                "error_log": str(e),
+                "metrics": {},
+                "node_config": node_config
+            }
+
+    def _select_best_node(self, nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Evaluate all nodes and select the best-performing one based on evaluation criteria.
+        For 'synthetic_arithmetic' experiments, the last value of 'epoch_accuracy' is used.
+        For classification experiments (label_noise or pest_detection), 'classification_accuracy'
+        is used. In the event that all nodes are buggy, the first node is selected.
+        
+        Args:
+            nodes (List[Dict[str, Any]]): List of node result dictionaries.
+        
+        Returns:
+            Dict[str, Any]: The best node dictionary.
+        """
+        best_score: float = -float("inf")
+        best_node: Optional[Dict[str, Any]] = None
+        for node in nodes:
+            status: str = node.get("status", "buggy")
+            metrics: Dict[str, Any] = node.get("metrics", {})
+            score: float = -float("inf")
+            if status == "non-buggy":
+                if "epoch_accuracy" in metrics:
+                    acc_list: List[float] = metrics.get("epoch_accuracy", [])
+                    if acc_list:
+                        score = acc_list[-1]
+                elif "classification_accuracy" in metrics:
+                    score = metrics.get("classification_accuracy", 0.0)
+            if score > best_score:
+                best_score = score
+                best_node = node
+        if best_node is None and nodes:
+            best_node = nodes[0]
+        logging.info(f"Selected best node: '{best_node.get('node_id', 'unknown')}' with score {best_score}")
+        return best_node
+
+    def _replicate_node(self, best_node: Dict[str, Any], experiment_callable: Callable, n_replications: int = 3) -> Dict[str, Any]:
+        """
+        Replicate the best node several times with different random seeds to compute mean and standard deviation
+        of performance metrics for statistical robustness.
+        
+        Args:
+            best_node (Dict[str, Any]): The best node configuration from the current stage.
+            experiment_callable (Callable): The experiment function.
+            n_replications (int): The number of replications to run.
+            
+        Returns:
+            Dict[str, Any]: A dictionary containing individual replication metrics and aggregated
+                            (mean and std) results.
+        """
+        replication_metrics: List[Dict[str, Any]] = []
+        base_config: Dict[str, Any] = copy.deepcopy(best_node.get("node_config", {}))
+        for i in range(n_replications):
+            rep_config: Dict[str, Any] = copy.deepcopy(base_config)
+            rep_config["replication_seed"] = random.randint(0, 10000)
+            result = self._run_node(rep_config, experiment_callable)
+            replication_metrics.append(result.get("metrics", {}))
+            logging.info(f"Replication {i+1} for node '{best_node.get('node_id')}' completed.")
+        aggregated: Dict[str, Any] = {"replications": replication_metrics}
+        if replication_metrics:
+            agg_results: Dict[str, Dict[str, float]] = {}
+            # Assume that each metrics dict contains numeric values or lists (take last values if list).
+            first_rep = replication_metrics[0]
+            for key in first_rep.keys():
+                values: List[float] = []
+                for rep in replication_metrics:
+                    val = rep.get(key)
+                    if isinstance(val, list) and len(val) > 0:
+                        values.append(float(val[-1]))
+                    elif isinstance(val, (int, float)):
+                        values.append(float(val))
+                if values:
+                    mean_val = float(np.mean(values))
+                    std_val = float(np.std(values))
+                    agg_results[key] = {"mean": mean_val, "std": std_val}
+            aggregated["aggregated_metrics"] = agg_results
+        return aggregated
+
+    def _debug_node(self, node: Dict[str, Any], experiment_callable: Callable) -> Dict[str, Any]:
+        """
+        Attempt to debug a buggy node if its debug depth is below the maximum allowed.
+        A new node configuration is generated with an incremented debug depth and a modified node_id.
+        
+        Args:
+            node (Dict[str, Any]): The buggy node dictionary.
+            experiment_callable (Callable): The experiment function.
+        
+        Returns:
+            Dict[str, Any]: The result dictionary from the debug branch.
+        """
+        current_depth: int = node.get("debug_depth", 0)
+        if current_depth >= self.max_debug_depth:
+            logging.info(f"Node '{node.get('node_id')}' has reached maximum debug depth; no further debug will be attempted.")
+            return node
+        debug_config: Dict[str, Any] = copy.deepcopy(node.get("node_config", {}))
+        debug_config["debug_depth"] = current_depth + 1
+        old_node_id: str = debug_config.get("node_id", "unknown")
+        debug_config["node_id"] = f"{old_node_id}_debug{current_depth+1}"
+        logging.info(f"Debug branch initiated: from node '{node.get('node_id')}' to new node '{debug_config['node_id']}'")
+        debug_result: Dict[str, Any] = self._run_node(debug_config, experiment_callable)
+        return debug_result
+
+
+# If this file is executed as main, run a simple test of the ExperimentManager.
+if __name__ == "__main__":
+    import yaml
+    import json
+
+    # Load configuration from config.yaml.
+    config_path: str = "config.yaml"
+    try:
+        with open(config_path, "r") as f:
+            config_data: Dict[str, Any] = yaml.safe_load(f)
+    except Exception as e:
+        logging.error(f"Error loading {config_path}: {e}")
+        config_data = {}
+
+    # Define a dummy experiment callable for testing.
+    def dummy_experiment_callable(node_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Dummy experiment function simulating a training run.
+        Returns a dictionary with keys:
+          - 'status': "non-buggy" or "buggy" (simulated with a 20% chance of error)
+          - 'metrics': Contains dummy 'epoch_accuracy' (list) and 'loss' (list)
+          - 'error_log': String with error message if any.
+        """
+        import time
+        time.sleep(1)  # Simulate processing delay.
+        # Randomly simulate a buggy node in 20% of runs.
+        if random.random() < 0.2:
+            return {
+                "status": "buggy",
+                "metrics": {"epoch_accuracy": [0.0], "loss": [100.0]},
+                "error_log": "Simulated error."
+            }
+        else:
+            dummy_acc: float = random.uniform(0.5, 1.0)
+            dummy_loss: float = random.uniform(0.0, 10.0)
+            return {
+                "status": "non-buggy",
+                "metrics": {"epoch_accuracy": [dummy_acc], "loss": [dummy_loss]},
+                "error_log": ""
+            }
+
+    # Initialize the ExperimentManager.
+    manager = ExperimentManager(config_data)
+    # Add the dummy experiment.
+    manager.add_experiment("dummy_experiment", dummy_experiment_callable)
+    # Run experiments.
+    results = manager.run_experiments()
+    # Print aggregated results.
+    print("Aggregated Experiment Results:")
+    print(json.dumps(results, indent=2))
+```

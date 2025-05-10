@@ -1,0 +1,79 @@
+----------------------------------------
+[Implementation approach]
+We will build a simple, modular Python system leveraging open-source libraries such as PyTorch for model training, Hugging Face Datasets for data loading, and Matplotlib for visualization. The system is organized into distinct modules for dataset loading, model definition, training, evaluation, and experiment management. An Experiment Manager will coordinate experiment runs (including our tree-search based variants) and aggregate results. The design is kept minimal to facilitate reproducibility and extendability while also allowing integration of basic LLM/VLM driven functionalities in the future.
+
+----------------------------------------
+[File list]
+- main.py
+- dataset_loader.py
+- model.py
+- trainer.py
+- evaluation.py
+- experiment_manager.py
+- utils.py
+
+----------------------------------------
+[Data structures and interfaces]
+classDiagram
+    class Main {
+        +__init__()
+        +run_experiment() -> None
+    }
+    class DatasetLoader {
+        +__init__(config: dict)
+        +load_data() -> Tuple[Any, Any]  // returns (train_data, test_data)
+    }
+    class Model {
+        +__init__(params: dict)
+        +forward(x: Tensor) -> Tensor
+    }
+    class Trainer {
+        +__init__(model: Model, optimizer: torch.optim.Optimizer, scheduler: Optional[Any], data: Any, config: dict)
+        +train() -> dict  // returns training metrics
+        +validate() -> dict // returns validation metrics
+    }
+    class Evaluation {
+        +__init__(model: Model, data: Any, config: dict)
+        +evaluate() -> dict // returns evaluation metrics
+    }
+    class ExperimentManager {
+        +__init__(config: dict)
+        +add_experiment(name: str, experiment_callable: Callable) -> None
+        +run_experiments() -> List[dict]  // aggregates results from experiments
+    }
+
+    Main --> DatasetLoader
+    Main --> Model
+    Main --> Trainer
+    Main --> Evaluation
+    Main --> ExperimentManager
+    Trainer --> Model
+    ExperimentManager --> Trainer
+
+----------------------------------------
+[Program call flow]
+sequenceDiagram
+    participant M as Main
+    participant EM as ExperimentManager
+    participant DL as DatasetLoader
+    participant MD as Model
+    participant TR as Trainer
+    participant EV as Evaluation
+
+    M->>EM: Initialize ExperimentManager(config)
+    EM->>DL: Load data using load_data()
+    DL-->>EM: Return (train_data, test_data)
+    EM->>MD: Initialize Model(params)
+    EM->>TR: Create Trainer(model, optimizer, scheduler, train_data, config)
+    TR->>MD: Forward pass during training
+    TR-->>EM: Return training metrics
+    EM->>EV: Initialize Evaluation(model, test_data, config)
+    EV->>MD: Forward pass during evaluation
+    MD-->>EV: Return predictions
+    EV-->>EM: Return evaluation metrics
+    EM-->>M: Return aggregated results (metrics, plots, logs)
+
+----------------------------------------
+[Anything UNCLEAR]
+The exact specifications of the synthetic arithmetic dataset, label noise injection procedure, and pest detection image preprocessing (including augmentation parameters) remain unclear. Additionally, further clarification is needed regarding the detailed hyperparameter settings for each experiment variant and the integration specifics for LLM/VLM based code generation and feedback.
+

@@ -1,0 +1,272 @@
+"""
+main.py
+
+This is the main entry point for the autonomous research pipeline that reproduces
+the experiments and methodologies described in the paper "The AI Scientist-v2".
+It coordinates configuration loading, random seed initialization, logging setup,
+instantiation of the ExperimentManager, registration of experiments (synthetic
+arithmetic with compositional regularization, label noise calibration, and pest detection),
+execution via a tree search–based framework, and finally aggregation and output of results.
+
+The high-level flow is as follows:
+  1. Import standard packages and project modules.
+  2. Load configuration from "config.yaml" and set up logging and random seeds.
+  3. Instantiate the ExperimentManager with the loaded configuration.
+  4. Define and register experiment callables for:
+       - Synthetic Arithmetic (compositional regularization) experiment.
+       - Label Noise Calibration experiment.
+       - Pest Detection experiment.
+  5. Run all experiments via the ExperimentManager and output the aggregated results.
+  
+All configuration parameters are read from "config.yaml". Default values are set
+explicitly if a setting is missing.
+  
+Author: [Your Name]
+Date: [Date]
+"""
+
+import os
+import json
+import random
+import logging
+from typing import Any, Dict, List, Optional
+
+import torch
+
+# Import project modules
+from dataset_loader import DatasetLoader
+from model import LSTMModel, ResNet18Model
+from trainer import Trainer
+from evaluation import Evaluation
+from experiment_manager import ExperimentManager
+from utils import load_config, setup_logging, set_random_seed
+
+# Define experiment callable for the Synthetic Arithmetic (Compositional Regularization) Experiment.
+def experiment_compositional_reg(node_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Run the synthetic arithmetic experiment with compositional regularization.
+    
+    This experiment uses a generated synthetic dataset of arithmetic expressions,
+    trains an LSTM-based model with an additional compositional loss term (computed
+    as the mean squared difference between successive input embeddings), and then
+    evaluates the model's performance.
+    
+    Args:
+        node_config (Dict[str, Any]): Configuration dictionary specific to this node.
+    
+    Returns:
+        Dict[str, Any]: Dictionary containing the node's status, aggregated metrics,
+                        and an error log if any.
+    """
+    # Instantiate DatasetLoader for synthetic arithmetic data.
+    loader: DatasetLoader = DatasetLoader(config, experiment_type="synthetic_arithmetic")
+    train_data, val_data, test_data = loader.load_data()
+
+    # Define model hyperparameters and instantiate the LSTM-based model.
+    lstm_params: Dict[str, Any] = {
+        "vocab_size": 50,
+        "embedding_dim": 16,
+        "lstm_hidden_size": 32,
+        "lstm_num_layers": 1,
+        "output_size": 1
+    }
+    model: LSTMModel = LSTMModel(lstm_params)
+
+    # Retrieve training configuration for compositional regularization experiment.
+    training_config_cr: Dict[str, Any] = config.get("training", {}).get("compositional_reg", {})
+    lr_cr: float = float(training_config_cr.get("learning_rate", 0.001))
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr_cr)
+    scheduler = None  # No scheduler by default.
+
+    # Create Trainer for synthetic arithmetic experiment.
+    trainer: Trainer = Trainer(model, optimizer, scheduler, train_data, config, experiment_type="synthetic_arithmetic")
+    train_metrics: Dict[str, Any] = trainer.train()
+    val_metrics: Dict[str, Any] = trainer.validate(val_data)
+
+    # Evaluate the model on the test set.
+    evaluation_instance: Evaluation = Evaluation(model, test_data, config)
+    eval_metrics: Dict[str, Any] = evaluation_instance.evaluate()
+
+    # Aggregate metrics from training, validation, and evaluation.
+    aggregated_metrics: Dict[str, Any] = {}
+    aggregated_metrics.update(train_metrics)
+    aggregated_metrics.update(val_metrics)
+    aggregated_metrics.update(eval_metrics)
+
+    return {
+        "status": "non-buggy",
+        "metrics": aggregated_metrics,
+        "error_log": ""
+    }
+
+# Define experiment callable for the Label Noise Calibration Experiment.
+def experiment_label_noise(node_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Run the label noise calibration experiment on CIFAR-10 (and/or MNIST).
+    
+    This experiment loads the CIFAR-10 dataset via Hugging Face's datasets loader,
+    optionally injects synthetic label noise (symmetric or asymmetric), trains a ResNet-18
+    based model using a classification objective (CrossEntropyLoss), and evaluates both
+    accuracy and the Expected Calibration Error (ECE).
+    
+    Args:
+        node_config (Dict[str, Any]): Configuration dictionary specific to this node, which
+                                      can include "noise_type" and "noise_level" parameters.
+    
+    Returns:
+        Dict[str, Any]: Dictionary containing the node's status, aggregated metrics, and error log.
+    """
+    # Instantiate DatasetLoader for label noise experiment.
+    loader: DatasetLoader = DatasetLoader(config, experiment_type="label_noise")
+    train_dataset, val_dataset, test_dataset = loader.load_data()
+
+    # Determine noise parameters from node_config (default symmetric noise with 10% noise level).
+    noise_type: str = node_config.get("noise_type", "symmetric")
+    noise_level: float = float(node_config.get("noise_level", 0.1))
+    # For list-like train_dataset, inject label noise.
+    if isinstance(train_dataset, list):
+        train_dataset = loader.inject_label_noise(train_dataset, noise_type, noise_level)
+
+    # Instantiate ResNet18Model for label noise calibration (assume 10 classes for CIFAR-10).
+    resnet_params: Dict[str, Any] = {"num_classes": 10}
+    model: ResNet18Model = ResNet18Model(resnet_params)
+
+    # Retrieve training configuration for label noise experiment.
+    training_config_ln: Dict[str, Any] = config.get("training", {}).get("label_noise", {})
+    lr_ln: float = float(training_config_ln.get("learning_rate", 0.1))
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr_ln, momentum=0.9)
+    scheduler = None  # Scheduler can be added if needed.
+
+    # Create Trainer for label noise experiment.
+    trainer: Trainer = Trainer(model, optimizer, scheduler, train_dataset, config, experiment_type="label_noise")
+    train_metrics: Dict[str, Any] = trainer.train()
+    val_metrics: Dict[str, Any] = trainer.validate(val_dataset)
+
+    # Evaluate the model on the test set.
+    evaluation_instance: Evaluation = Evaluation(model, test_dataset, config)
+    eval_metrics: Dict[str, Any] = evaluation_instance.evaluate()
+
+    aggregated_metrics: Dict[str, Any] = {}
+    aggregated_metrics.update(train_metrics)
+    aggregated_metrics.update(val_metrics)
+    aggregated_metrics.update(eval_metrics)
+
+    return {
+        "status": "non-buggy",
+        "metrics": aggregated_metrics,
+        "error_log": ""
+    }
+
+# Define experiment callable for the Pest Detection Experiment.
+def experiment_pest_detection(node_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Run the pest detection experiment using a real-world pest detection dataset.
+    
+    This experiment loads the pest detection dataset (or generates a dummy one),
+    trains a ResNet-18 based model (fine-tuned from ImageNet weights) for classification,
+    and performs evaluation under both normal and augmented conditions to compute an
+    Environmental Robustness Score (ERS). A grid search over learning rates is simulated,
+    where the candidate learning rate is chosen from the configuration grid or provided
+    in the node configuration.
+    
+    Args:
+        node_config (Dict[str, Any]): Configuration dictionary specific to this node, which
+                                      may include an overriding "learning_rate".
+    
+    Returns:
+        Dict[str, Any]: Dictionary containing the node's status, aggregated evaluation metrics,
+                        and any error logs.
+    """
+    # Instantiate DatasetLoader for pest detection.
+    loader: DatasetLoader = DatasetLoader(config, experiment_type="pest_detection")
+    train_data, val_data, test_data = loader.load_data()
+
+    # Instantiate ResNet18Model for pest detection; assume 5 classes.
+    resnet_params: Dict[str, Any] = {"num_classes": 5}
+    model: ResNet18Model = ResNet18Model(resnet_params)
+
+    # Retrieve training configuration for pest detection.
+    training_config_pd: Dict[str, Any] = config.get("training", {}).get("pest_detection", {})
+    lr_grid: List[float] = training_config_pd.get("learning_rate_grid", [1e-4, 5e-4, 1e-3, 5e-3, 1e-2])
+    # Select candidate learning rate from node_config if provided; otherwise, choose randomly from grid.
+    candidate_lr: float = float(node_config.get("learning_rate", random.choice(lr_grid)))
+    optimizer = torch.optim.Adam(model.parameters(), lr=candidate_lr)
+    scheduler = None
+
+    # For pest detection, determine grid_epochs (for a short run) from config.
+    grid_epochs: int = int(training_config_pd.get("grid_epochs", 10))
+    # Temporarily override pest_detection epochs in the training configuration for this run.
+    training_config_pd["epochs"] = grid_epochs
+
+    # Create Trainer for pest detection experiment.
+    trainer: Trainer = Trainer(model, optimizer, scheduler, train_data, config, experiment_type="pest_detection")
+    train_metrics: Dict[str, Any] = trainer.train()
+    val_metrics: Dict[str, Any] = trainer.validate(val_data)
+
+    # Define an augmentation function to simulate environmental variability.
+    def augment_fn(image: Any) -> Any:
+        # Set default augmentation parameters.
+        params: Dict[str, float] = {
+            "brightness": 1.2,  # Increase brightness by 20%
+            "contrast": 1.1,    # Increase contrast by 10%
+            "gaussian_blur": 1.0,  # Apply Gaussian blur with radius 1.0
+            "rotation": 5.0     # Rotate image by 5 degrees
+        }
+        return loader.apply_augmentation(image, params)
+
+    # Evaluate the pest detection model; pass the augmentation function.
+    evaluation_instance: Evaluation = Evaluation(model, test_data, config, augment_fn=augment_fn)
+    eval_metrics: Dict[str, Any] = evaluation_instance.evaluate()
+
+    aggregated_metrics: Dict[str, Any] = {}
+    aggregated_metrics.update(train_metrics)
+    aggregated_metrics.update(val_metrics)
+    aggregated_metrics.update(eval_metrics)
+
+    return {
+        "status": "non-buggy",
+        "metrics": aggregated_metrics,
+        "error_log": ""
+    }
+
+def main() -> None:
+    """
+    Main function to coordinate the entire pipeline:
+      - Load configuration.
+      - Set up logging and random seeds.
+      - Initialize the ExperimentManager.
+      - Register experiments for synthetic arithmetic, label noise, and pest detection.
+      - Run experiments via the ExperimentManager.
+      - Aggregate and output final results.
+    """
+    # Setup logging and load configuration from config.yaml.
+    setup_logging(log_level=logging.INFO)
+    global config  # Make the configuration accessible to experiment functions.
+    config = load_config("config.yaml")
+    
+    # Set global random seed for reproducibility.
+    seed_value: int = int(config.get("general", {}).get("random_seed", 42))
+    set_random_seed(seed_value)
+    
+    logging.info("Starting the autonomous experiment pipeline.")
+
+    # Instantiate the ExperimentManager with the loaded configuration.
+    exp_manager: ExperimentManager = ExperimentManager(config)
+    
+    # Register the experiments with their corresponding callables.
+    exp_manager.add_experiment("synthetic_arithmetic", experiment_compositional_reg)
+    exp_manager.add_experiment("label_noise", experiment_label_noise)
+    exp_manager.add_experiment("pest_detection", experiment_pest_detection)
+    
+    # Run all experiments via the ExperimentManager.
+    aggregated_results: List[Dict[str, Any]] = exp_manager.run_experiments()
+    
+    # Log and print the aggregated experimental results.
+    logging.info("Aggregated Experiment Results:")
+    results_json: str = json.dumps(aggregated_results, indent=2)
+    logging.info(results_json)
+    print("Final Aggregated Results:")
+    print(results_json)
+
+if __name__ == "__main__":
+    main()

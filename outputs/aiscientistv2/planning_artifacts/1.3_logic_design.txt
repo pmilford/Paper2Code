@@ -1,0 +1,44 @@
+----------------------------------------
+[Required packages]
+- numpy==1.21.0
+- torch==1.9.0
+- matplotlib==3.4.0
+- datasets==1.14.0
+- tqdm==4.60.0
+
+----------------------------------------
+[Required Other language third-party packages]
+- No third-party dependencies required
+
+----------------------------------------
+[Logic Analysis]
+- ['dataset_loader.py', 'DatasetLoader class: Responsible for loading data using the Hugging Face datasets library, performing preprocessing, splitting the data (e.g., train/test splits) for the different experiments (synthetic arithmetic, label noise calibration, and pest detection). Imports numpy for data handling and supports augmentation if needed for pest detection. This file is used by main.py and experiment_manager.py.']
+- ['model.py', 'Model class: Defines the network architectures. Contains implementations for an LSTM-based model (with compositional regularization) and a ResNet-18 based model for image experiments. Imports torch.nn and torch.nn.functional for building the models. This file is imported by trainer.py and evaluation.py.']
+- ['trainer.py', 'Trainer class: Implements the training loop for a given model and dataset. Computes loss (including additional regularization terms for the compositional experiment), performs backpropagation, updates parameters using optimizers, and logs training progress. Uses torch.optim and manages checkpoints. This module is used by main.py and experiment_manager.py.']
+- ['evaluation.py', 'Evaluation class: Provides methods to evaluate the model on validation/test sets. Computes performance metrics such as mean square error, prediction accuracy (with a tolerance), Expected Calibration Error (ECE), and Environmental Robustness Score (ERS). Also responsible for generating plots using Matplotlib. Imported by main.py and experiment_manager.py.']
+- ['experiment_manager.py', 'ExperimentManager class: Coordinates the overall experiment lifecycle including multiple stages (preliminary investigation, hyperparameter tuning, research agenda execution, and ablation studies). It manages multiple experimental runs (nodes) for tree search, replication of experiments with different random seeds, and aggregation of results. Calls DatasetLoader, Trainer, Evaluation and utilizes utils.py functions for logging and configuration. Serves as the central controller in main.py.']
+- ['utils.py', 'Utility module: Contains shared functions such as configuration management, logging setup, random seed initialization, checkpoint save/load helpers, and common plot functions. These utilities are shared among dataset_loader.py, trainer.py, evaluation.py, and experiment_manager.py.']
+- ['main.py', 'Main entry point: Reads configuration parameters, instantiates the ExperimentManager, and triggers the pipeline execution. It coordinates the process flow by calling into DatasetLoader, Model, Trainer, Evaluation, and ExperimentManager classes.']
+
+----------------------------------------
+[Task list]
+- dataset_loader.py
+- model.py
+- trainer.py
+- evaluation.py
+- experiment_manager.py
+- utils.py
+- main.py
+
+----------------------------------------
+[Full API spec]
+
+
+----------------------------------------
+[Shared Knowledge]
+The modules share common configuration settings (e.g., hyperparameters, random seed, logging parameters) defined in a central configuration structure, most likely stored in utils.py. All modules use PyTorch for model creation and training, Hugging Face's datasets library for data access, and Matplotlib for plotting. Consistent conventions for saving checkpoints and logging metrics are applied across Trainer, Evaluation, and ExperimentManager.
+
+----------------------------------------
+[Anything UNCLEAR]
+Clarification is needed regarding the exact formats for the synthetic arithmetic dataset, the precise procedure for injecting symmetric/asymmetric label noise, specific augmentation parameters for pest detection, and detailed hyperparameter values (especially for the tree-search mechanism and debug branching). Additional details on how LLM/VLM integration should be implemented (if required in the future) would also be helpful.
+

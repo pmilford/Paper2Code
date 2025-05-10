@@ -1,0 +1,104 @@
+Below is the detailed logic analysis for the dataset_loader.py module. This file’s responsibility is to load, preprocess, and split the data needed for all three experiment types (synthetic arithmetic, label noise calibration, and pest detection) using the Hugging Face datasets library and NumPy for data handling. The module must also optionally apply augmentation for the pest detection experiment. The analysis below describes, step by step, how the DatasetLoader class should behave and interact with other parts of the system.
+
+─────────────────────────────  
+1. Overall Structure and Initialization
+
+• The DatasetLoader class is initialized with a configuration dictionary (passed from the central configuration structure).  
+• It should extract key parameters including the random seed (from general.random_seed, e.g., 42) and the train/validation/test split ratios (from general.data_split: train=0.7, validation=0.15, test=0.15).  
+• Additionally, the class should accept an indicator parameter (or infer from the configuration) to determine which experiment is running (e.g., "synthetic_arithmetic", "label_noise", or "pest_detection"). This will guide the loading, augmentation, or generation steps.
+
+─────────────────────────────  
+2. Data Loading Based on Experiment Type
+
+A. Synthetic Arithmetic Experiment  
+  • Since this dataset is generated on the fly (as described in the paper), the DatasetLoader must include a function to programmatically create a synthetic arithmetic dataset.  
+    – Generate a pre-defined number of random arithmetic expressions (e.g., approximately 1000 for training and 200 for testing).  
+    – Each data point may consist of:
+         ▪ An input string or tokenized sequence representing the arithmetic expression (for example, “3+4”).
+         ▪ A corresponding numeric target (the evaluated result).  
+  • Preprocessing:  
+    – Convert the expressions into an appropriate numerical format (for instance, token indices if later passed to an embedding layer) using NumPy arrays.  
+    – Optionally, apply normalization if needed (depending on model requirements).  
+  • Splitting:  
+    – Although the paper mentions a fixed split (1000 training and 200 test), it would be beneficial to use the split ratios from the configuration to optionally further subdivide the synthetic data into training, validation, and test sets when required.
+
+B. Label Noise Calibration Experiment  
+  • For studies on label noise calibration, the DatasetLoader will use the Hugging Face datasets library to load standard datasets such as CIFAR-10 and MNIST (or Fashion-MNIST if desired).  
+    – Call datasets.load_dataset() with the proper dataset identifier.  
+  • Preprocessing:  
+    – Perform any necessary normalization or transforms (e.g., converting images to a tensor or NumPy array).  
+    – Ensure that the loaded dataset contains clearly defined splits. If the loaded dataset is not already split into train/validation/test, then use the split ratios from the configuration (0.7 for training, 0.15 for validation, 0.15 for test) to randomly split the data.  
+  • Label noise injection (if desired within this module):  
+    – Optionally, include functions that inject synthetic label noise.  
+         ▪ For symmetric noise: randomly select a percentage of the labels (e.g., between 10% and 50%) and replace them with a random label chosen uniformly from the available classes.  
+         ▪ For asymmetric noise: use a predefined confusion pattern (for example, mapping label i to (i+1) % NUM_CLASSES) to simulate realistic mislabeling.  
+    – The injection functions will use NumPy’s random number generation (with the fixed random seed) to ensure reproducibility.  
+    – It might be beneficial to allow the caller (or ExperimentManager) to specify the noise percentage and type; if not, reasonable defaults can be applied.
+
+C. Pest Detection Experiment  
+  • The pest detection experiment will similarly leverage Hugging Face’s datasets library if the dataset is available there (or it might load a local dataset if that is the chosen strategy).  
+  • Data Splitting:  
+    – Use the data split percentages provided (train 70%, validation 15%, test 15%).  
+  • Preprocessing and Augmentation:  
+    – Preprocess images appropriately (resizing, normalization, and converting to tensor/NumPy arrays).  
+    – Apply data augmentation routines specifically for simulating environmental variability (e.g., brightness/contrast adjustments, Gaussian blur, random affine transformations).  
+         ▪ While the exact augmentation parameters are not fully specified, the logic should plan for an “augmentation” flag and a function that applies these transformations on the test (or evaluation) set, to later be used for computing the Environmental Robustness Score (ERS).  
+         ▪ The augmentations may be implemented using basic procedures in Python (or, if available, leveraging PIL or simple NumPy operations) even if torchvision is not an allowed dependency.
+
+─────────────────────────────  
+3. Preprocessing, Splitting, and Reproducibility
+
+• For all experiment types, after the data is either generated (synthetic arithmetic) or loaded (CIFAR-10, MNIST, pest detection), the data must be split into training, validation, and test sets using the ratios specified in the configuration.  
+• Use the provided random seed (42) to ensure that all random splitting and noise injections are deterministic and reproducible.  
+• The splitting logic should use NumPy’s random permutation functions (or similar methods) to randomly select indices for each split.  
+• The preprocessed data should be returned in a uniform format (for example, as NumPy arrays or as dataset objects) so that Trainer and Evaluation classes can later consume them.
+
+─────────────────────────────  
+4. Integration Considerations and Interfaces
+
+• The DatasetLoader’s load_data() function (or similarly named function) must return a tuple containing the processed training and test datasets (and possibly a validation set).  
+• It should provide a flexible interface so that ExperimentManager and main.py can easily choose the correct data loader based on an experiment type parameter.  
+• Logging of key information (such as number of samples, any issues during noise injection, or augmentation parameters applied) should be included using helper functions from utils.py.  
+• Any errors or inconsistencies during data loading or preprocessing should be gracefully handled, logged, and returned (or raised) in a way that can be recorded by the ExperimentManager for later debugging.
+
+─────────────────────────────  
+5. Summary of the Expected Functions and Their Behaviors in DatasetLoader
+
+• __init__(self, config: dict, experiment_type: str)  
+  – Reads the configuration parameters (random seed, data split ratios, etc.).  
+  – Stores the experiment type so that subsequent call(s) to load_data() know which dataset generation or loading logic to invoke.
+
+• load_data(self) -> Tuple[Any, Any, Any]  
+  – Checks the experiment type:
+      ▪ If experiment_type is “synthetic_arithmetic”:  
+              – Generate synthetic arithmetic expressions, compute corresponding numeric results, then optionally split (if needed) into train, validation, and test sets.
+      ▪ If experiment_type is “label_noise”:  
+              – Use datasets.load_dataset() to load the chosen dataset (e.g., CIFAR-10, MNIST).  
+              – Split the dataset according to the provided ratios.  
+              – Optionally, call a helper function to inject symmetric or asymmetric label noise.
+      ▪ If experiment_type is “pest_detection”:  
+              – Load the pest detection dataset (from Hugging Face or a local file).  
+              – Apply necessary preprocessing steps (resizing, normalization).  
+              – Perform train/validation/test split using the ratios.  
+              – Initialize data augmentation routines that can later be applied during evaluation.
+  – Returns the split datasets (commonly (train_data, validation_data, test_data)) in a format consistent with downstream modules.
+
+• Additional Helper Functions  
+  – generate_synthetic_arithmetic_data(num_train: int, num_test: int)  
+      ▪ Generates arithmetic expressions and their evaluated outputs.
+  – inject_label_noise(data: Any, noise_type: str, noise_level: float)  
+      ▪ Modifies the label column of the dataset by applying symmetric or asymmetric noise using NumPy.
+  – apply_augmentation(image: np.array, augmentation_params: dict) -> np.array  
+      ▪ Applies brightness/contrast changes, Gaussian blur, and affine transformations to simulate environmental variability (specifically for pest detection).
+
+─────────────────────────────  
+6. Reproducibility and Logging
+
+• Set the random seed for NumPy and any other random generators using the provided seed from the configuration.  
+• Log the number of samples in each split, the noise levels applied (if any), and details regarding applied augmentations.  
+• Ensure that the output format, whether it is a tuple containing NumPy arrays or Hugging Face dataset objects, is well-documented for future integrators (e.g., Trainer and ExperimentManager).
+
+─────────────────────────────  
+Conclusion
+
+This logic analysis outlines the necessary responsibilities and internal workflow for the DatasetLoader class in dataset_loader.py. The key is to ensure modularity by supporting different experiment types through conditional logic (synthetic arithmetic generation, label noise processing, and pest detection with augmentations), while strictly following configuration parameters (including random seed and data splits). The module should expose a simple interface (load_data) that returns preprocessed and split datasets ready for downstream model training and evaluation, facilitating reproducibility and accurate logging for the whole autonomous scientific discovery pipeline.

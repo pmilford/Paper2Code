@@ -1,0 +1,80 @@
+Below is the high-level logic analysis (written as if it were comments inside main.py) that explains how the entry point coordinates the entire pipeline.
+
+─────────────────────────────  
+# Logic Analysis – main.py
+
+1. Import and configuration loading:
+   • The main.py file begins by importing standard packages (e.g., os, yaml, logging) and, importantly, the modules/classes defined in the project:
+     – DatasetLoader (from dataset_loader.py)
+     – Model (from model.py)
+     – Trainer (from trainer.py)
+     – Evaluation (from evaluation.py)
+     – ExperimentManager (from experiment_manager.py)
+     – Utility functions from utils.py for reading configuration, setting random seeds, and initializing logging.
+   • It will then read in the configuration from "config.yaml" so that all hyperparameters and experiment settings (for compositional regularization, label noise calibration, and pest detection) are available as a single dictionary.
+   • The global random seed (42 as specified) is set immediately once configuration is loaded to ensure reproducibility. Logging options are also set up at this point.
+
+2. Instantiation of core experimental components:
+   • The main entry point then creates an instance of the ExperimentManager by passing in the loaded configuration. The ExperimentManager is responsible for orchestrating the experimental lifecycle.
+     – The configuration passed here includes the tree-search settings (debug_probability = 1.0, max_debug_depth = 3, max_runtime_per_node = "1h",
+       and stage-specific node allocation) as well as the training hyperparameters.
+   • The ExperimentManager acts as the central controller and will later internally call the other modules.
+
+3. Registration of experiments:
+   • For each of the three experimental setups, main.py (or the ExperimentManager) will schedule experiments:
+     – For the synthetic arithmetic experiment with compositional regularization:
+         • Instantiate a DatasetLoader (configured to generate or load the synthetic arithmetic dataset).
+         • Create the corresponding LSTM-based model object (with an embedding layer, LSTM layer, and fully connected output).
+         • Create a Trainer instance using the model, passing in the optimizer (“Adam”), learning rate (0.001), training epochs (30), batch size (32), and regularization weight (0.1).
+         • Optionally, an Evaluation instance will be created later to process test data and generate loss/accuracy plots.
+     – For the label noise calibration experiment:
+         • Instantiate a DatasetLoader that uses Hugging Face’s datasets library to load CIFAR-10/MNIST (with the appropriate train/validation/test splits) and then injects synthetic symmetric or asymmetric noise.
+         • The ResNet-18-based model is instantiated here.
+         • A Trainer instance is created with training settings (optimizers, learning rate 0.1, lr decay parameters, 100 epochs, batch size 128) from the label_noise section.
+         • Evaluation will compute accuracy and Expected Calibration Error (ECE) with reliability diagrams.
+     – For the pest detection experiment:
+         • Instantiate the DatasetLoader to load the Crop Pest and Disease dataset as well as (optionally) additional datasets (EuroSAT, MedMNIST, CIFAR-10), using the “general.data_split” values.
+         • Instantiate the ResNet-18-based model (using ImageNet pre-trained weights) to be fine-tuned.
+         • A grid search over learning rates (from pest_detection.learning_rate_grid) is set up for a short run (10 epochs).
+         • Once a promising learning rate is identified, a longer training run (30 epochs) will be scheduled.
+         • During evaluation, data augmentation is applied to test conditions to compute the Environmental Robustness Score (ERS).
+   • These experiments (or “nodes” in the tree search view) are added into the ExperimentManager using an interface analogous to add_experiment(name, experiment_callable).
+
+4. Running the experiments:
+   • Once all experiment callables are registered, main.py calls ExperimentManager.run_experiments().
+     – Internally, the ExperimentManager will coordinate:
+         • The tree-search procedure: launching multiple nodes concurrently (using the node allocation per stage).
+         • Monitoring each node’s “execution” by calling the Trainer’s training loop (with forward passes performed by the Model) and Evaluation’s evaluation method.
+         • Capturing output artifacts such as numpy files, error logs, and generated plots.
+         • Utilizing debug branches (with debug probability 1.0) and a maximum debug depth of 3 to focus on buggy nodes.
+         • Replicating experiments using different random seeds to calculate means and standard deviations.
+   • The ExperimentManager aggregates the experimental results after all stages (preliminary run, hyperparameter tuning, research execution, ablation studies) into a consolidated results list or JSON summary.
+
+5. Final output and cleanup:
+   • After run_experiments() completes, main.py receives the aggregated results (a list of dictionaries containing metrics, file paths for plots and logs, and possibly status information for each experiment).
+   • The main entry point then:
+         • Logs or prints the final experiment results to the console.
+         • Optionally saves the aggregated results to disk (or prepares the data to be fed to the Manuscript Generation module later on).
+         • Handles graceful shutdown if any errors occurred.
+
+6. Future wiring for LLM/VLM integration:
+   • Although not implemented immediately, main.py’s overall structure leaves room for later integration:
+         • LLM-based code generation prompts and evaluation calls can be added around the experiment nodes.
+         • VLM feedback modules for quality checking generated plots will be triggered after evaluations.
+         • The final manuscript generation module may consume the aggregated outputs to generate a draft paper.
+   • These integrations must strictly follow the design and use the same configuration settings, ensuring consistency across modules.
+
+─────────────────────────────  
+In summary, main.py acts as the coordinator:
+   – It reads the configuration from yaml.
+   – Sets up the global environment (logging, seeds).
+   – Instantiates the ExperimentManager.
+   – Registers each experiment (dataset loading, model construction, training, and evaluation) according to the experimental design specified in the paper and plan.
+   – Finally, it triggers the experiment execution through the ExperimentManager, which will perform the tree-search based exploration and replicate experiments as specified, finally aggregating and outputting results.
+
+This structured flow ensures that each module (DatasetLoader, Model, Trainer, Evaluation, and ExperimentManager) is called in the proper order and that the overall autonomous workflow mirrors the methodology and experimental setup described in the paper, all while strictly adhering to the configuration file parameters.
+
+─────────────────────────────  
+# End of Logic Analysis for main.py
+
+This analysis serves as a guide for how main.py should coordinate the entire end-to-end pipeline while ensuring reproducibility and adherence to the paper’s protocols.

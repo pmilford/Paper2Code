@@ -1,0 +1,43 @@
+2025-05-09 15:50:50,990 INFO: Logging is set up at level INFO. Log file: 'experiment.log'.
+2025-05-09 15:50:50,994 INFO: Configuration loaded from 'config.yaml'.
+2025-05-09 15:50:51,140 INFO: Random seed set to 42 for reproducibility.
+2025-05-09 15:50:51,142 INFO: Starting the autonomous experiment pipeline.
+2025-05-09 15:50:51,151 INFO: ExperimentManager initialized with config: debug_probability=1.0, max_debug_depth=3, node_allocation={'stage1': 21, 'stage2': 12, 'stage3': 12, 'stage4': 12}
+2025-05-09 15:50:51,151 INFO: Experiment 'synthetic_arithmetic' added to the manager.
+2025-05-09 15:50:51,151 INFO: Experiment 'label_noise' added to the manager.
+2025-05-09 15:50:51,151 INFO: Experiment 'pest_detection' added to the manager.
+2025-05-09 15:50:51,151 INFO: Starting experiment: synthetic_arithmetic
+2025-05-09 15:50:51,151 INFO: Starting stage stage1 for experiment 'synthetic_arithmetic'
+2025-05-09 15:50:51,151 INFO: Spawning 21 nodes in stage 'stage1'.
+2025-05-09 15:50:51,911 INFO: DatasetLoader initialized with experiment_type: synthetic_arithmetic, random_seed: 42, data_split: {'train': 0.7, 'validation': 0.15, 'test': 0.15}
+2025-05-09 15:50:51,911 INFO: DatasetLoader initialized with experiment_type: synthetic_arithmetic, random_seed: 42, data_split: {'train': 0.7, 'validation': 0.15, 'test': 0.15}
+2025-05-09 15:50:51,912 INFO: DatasetLoader initialized with experiment_type: synthetic_arithmetic, random_seed: 42, data_split: {'train': 0.7, 'validation': 0.15, 'test': 0.15}
+2025-05-09 15:50:51,911 INFO: DatasetLoader initialized with experiment_type: synthetic_arithmetic, random_seed: 42, data_split: {'train': 0.7, 'validation': 0.15, 'test': 0.15}
+2025-05-09 15:50:51,912 INFO: DatasetLoader initialized with experiment_type: synthetic_arithmetic, random_seed: 42, data_split: {'train': 0.7, 'validation': 0.15, 'test': 0.15}
+2025-05-09 15:50:51,912 INFO: DatasetLoader initialized with experiment_type: synthetic_arithmetic, random_seed: 42, data_split: {'train': 0.7, 'validation': 0.15, 'test': 0.15}
+2025-05-09 15:50:51,912 INFO: DatasetLoader initialized with experiment_type: synthetic_arithmetic, random_seed: 42, data_split: {'train': 0.7, 'validation': 0.15, 'test': 0.15}
+2025-05-09 15:50:51,911 INFO: DatasetLoader initialized with experiment_type: synthetic_arithmetic, random_seed: 42, data_split: {'train': 0.7, 'validation': 0.15, 'test': 0.15}
+2025-05-09 15:50:52,592 INFO: Generated 1200 synthetic arithmetic samples.
+2025-05-09 15:50:52,594 INFO: Generated 1200 synthetic arithmetic samples.
+2025-05-09 15:50:52,594 INFO: Generated 1200 synthetic arithmetic samples.
+2025-05-09 15:50:52,595 INFO: Generated 1200 synthetic arithmetic samples.
+2025-05-09 15:50:52,605 INFO: Synthetic arithmetic dataset split: 840 train, 180 validation, 180 test samples.
+2025-05-09 15:50:52,607 INFO: Synthetic arithmetic dataset split: 840 train, 180 validation, 180 test samples.
+2025-05-09 15:50:52,608 INFO: Synthetic arithmetic dataset split: 840 train, 180 validation, 180 test samples.
+2025-05-09 15:50:52,612 INFO: Generated 1200 synthetic arithmetic samples.
+2025-05-09 15:50:52,613 INFO: Synthetic arithmetic dataset split: 840 train, 180 validation, 180 test samples.
+2025-05-09 15:50:52,608 INFO: Synthetic arithmetic dataset split: 840 train, 180 validation, 180 test samples.
+2025-05-09 15:50:52,617 INFO: Generated 1200 synthetic arithmetic samples.
+2025-05-09 15:50:52,618 INFO: Synthetic arithmetic dataset split: 840 train, 180 validation, 180 test samples.
+2025-05-09 15:50:52,620 INFO: Generated 1200 synthetic arithmetic samples.
+2025-05-09 15:50:52,621 INFO: Synthetic arithmetic dataset split: 840 train, 180 validation, 180 test samples.
+2025-05-09 15:50:52,622 INFO: Generated 1200 synthetic arithmetic samples.
+2025-05-09 15:50:52,623 INFO: Synthetic arithmetic dataset split: 840 train, 180 validation, 180 test samples.
+2025-05-09 16:44:37,638 INFO: Trainer initialized for experiment_type: synthetic_arithmetic, epochs: 30, batch_size: 32, reg_weight: 0.1
+2025-05-09 16:44:37,950 INFO: Trainer initialized for experiment_type: synthetic_arithmetic, epochs: 30, batch_size: 32, reg_weight: 0.1
+2025-05-09 16:44:38,177 INFO: Trainer initialized for experiment_type: synthetic_arithmetic, epochs: 30, batch_size: 32, reg_weight: 0.1
+2025-05-09 23:47:41,257 INFO: Trainer initialized for experiment_type: synthetic_arithmetic, epochs: 30, batch_size: 32, reg_weight: 0.1
+2025-05-09 23:47:42,839 INFO: Trainer initialized for experiment_type: synthetic_arithmetic, epochs: 30, batch_size: 32, reg_weight: 0.1
+2025-05-10 01:19:28,730 INFO: Trainer initialized for experiment_type: synthetic_arithmetic, epochs: 30, batch_size: 32, reg_weight: 0.1
+2025-05-10 03:07:43,129 INFO: Trainer initialized for experiment_type: synthetic_arithmetic, epochs: 30, batch_size: 32, reg_weight: 0.1
+2025-05-10 03:18:24,041 INFO: Trainer initialized for experiment_type: synthetic_arithmetic, epochs: 30, batch_size: 32, reg_weight: 0.1

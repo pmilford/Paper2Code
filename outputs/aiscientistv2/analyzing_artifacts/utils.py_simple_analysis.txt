@@ -1,0 +1,86 @@
+Below is a detailed logic analysis (in plain text comments) that you can include at the top of your utils.py file. This analysis explains the intended role and behavior of each helper function that will be written.
+
+------------------------------------------------------------
+# Logic Analysis for utils.py
+
+# Purpose:
+#   This module serves as the shared utility layer across the codebase. Its responsibilities include:
+#     • Reading and parsing the central configuration (from config.yaml)
+#     • Setting up a consistent logging system for all modules (to track progress and errors)
+#     • Initializing random seeds for reproducibility (across Python’s random, numpy, and torch)
+#     • Providing helper functions for saving and loading checkpoints (for models and optimizers)
+#     • Offering standardized plotting functions to create and save figures (used by the Evaluation module and Experiment Manager)
+#     • Including any common utilities (e.g., directory creation, config reloading) that support the reproducible end-to-end experiment pipeline
+
+# 1. Configuration Management:
+#    - We'll create a function (e.g., load_config) to read the YAML file "config.yaml" and return the configuration (a dict).
+#    - The config contains sections for training experiments (with separate settings for compositional regularization, label noise calibration, and pest detection),
+#      parameters for the experiment_manager (debug probability, max debug depth, node allocations), and general information (e.g., random seed, data split proportions).
+#    - All other modules (dataset_loader, trainer, evaluation, experiment_manager) will import this configuration object so that hyperparameter settings remain consistent.
+
+# 2. Logging Setup:
+#    - A setup_logging() function is needed to initialize Python's logging utilities.
+#    - The function will configure logging (using logging.basicConfig) so that:
+#       • A single log file (e.g., "experiment.log") is written.
+#       • Both console and file logging use the same logging level (set to INFO or DEBUG depending on needs).
+#       • All progress, warnings, and errors across modules (dataset loading, model training, evaluation, experiment management) are logged in a unified manner.
+#    - This ensures that any error in a node or during debugging gets captured for later analysis.
+
+# 3. Random Seed Initialization:
+#    - We will include a set_random_seed(seed) function that sets the seed for:
+#       • Python’s built-in random module,
+#       • Numpy’s random generator,
+#       • Torch (both CPU and, if applicable, GPU; using torch.manual_seed and torch.cuda.manual_seed_all).
+#    - The seed value is read from the "general.random_seed" key in the config.
+#    - This is critical to ensure that all experiments are reproducible across multiple runs.
+
+# 4. Checkpoint Save/Load Helpers:
+#    - To facilitate reproducibility and allow for “node” restarts during tree-search experiments, we add helper functions:
+#       • save_checkpoint(model, optimizer, epoch, checkpoint_dir):
+#           - This function saves the model’s state_dict along with the optimizer’s state and the current epoch into a checkpoint file.
+#           - It ensures the directory (e.g., “checkpoints/”) exists (using a helper such as create_directory).
+#       • load_checkpoint(file_path, model, optimizer):
+#           - This function reads the checkpoint file and loads the state dicts into the model and optimizer.
+#    - These functions allow us to “freeze” intermediate experiment nodes and later resume or analyze them.
+
+# 5. Common Plot Functions:
+#    - We need to support creation and saving of plots (e.g., training loss curves, accuracy plots, reliability diagrams).
+#    - Provide functions, for instance:
+#         • save_plot(fig, filename):
+#             - This function calls os.makedirs() (if needed) to ensure the “figures/” folder exists.
+#             - Then it saves the matplotlib figure (using plt.savefig) with high resolution (such as dpi=300) and proper layout.
+#         • create_standard_plot(data, labels, title, xlabel, ylabel, legend_settings):
+#             - Although not strictly necessary, a helper function for a standardized layout (font sizes, spines removed, legend adjustment) can be provided.
+#    - Standardizing plot creation ensures that all modules (especially Evaluation and Experiment Manager) produce consistent and publication-ready visualizations.
+#    - Additional safety with try/except blocks can be added so that failure in saving one plot does not stop the entire experiment.
+
+# 6. Miscellaneous Utilities:
+#    - create_directory(path):
+#         - A small helper that checks if a given directory exists and creates it if not.
+#    - Other helper functions may include:
+#         • A function to write aggregated experiment logs or results to JSON.
+#         • Reusable functions to process configuration parameters (e.g., converting “1h” into seconds, if needed, for timeout management in the experiment manager).
+#
+# 7. Integration Considerations:
+#    - The functions in this module will be imported by dataset_loader.py, trainer.py, evaluation.py, and experiment_manager.py.
+#    - All modules should refer to and use the same configurations, logging system, and shared reproducibility settings.
+#    - Even though the plan includes more advanced experiments (like agentic tree search with LLM/VLM feedback), current utilities will focus on the core reproducibility functions and common plotting.
+#
+# 8. Error handling and Robustness:
+#    - Each utility function is expected to handle potential errors and log helpful error messages.
+#    - For example, if the configuration file is missing or malformed, load_config should log an appropriate error.
+#    - The checkpoint load/save functions should log if files are not found or if there are any issues during saving/loading.
+#
+# Summary:
+# This utils.py module is the backbone of reproducibility and consistency across the entire experimental framework.
+# It covers key shared concerns such as managing configuration (reading config.yaml), ensuring reproducible runs via seed initialization,
+# setting up unified logging, and standardizing operations like checkpointing and plot generation.
+#
+# With this design:
+# - The tree-search and experimental nodes (managed by the ExperimentManager) will rely on utils.py for configuration and logging.
+# - Trainer and Evaluation modules can use the common checkpoint and plotting utilities to save and visualize their results.
+# - DatasetLoader can access configuration settings regarding data splits and (if needed) augmentation parameters for the pest detection experiments.
+#
+# This analysis ensures that all modules follow the same conventions and that the entire autonomous pipeline (from experiment
+# management to manuscript generation) can be run reproducibly and with clear logs and visualizations, in alignment with the paper's plan.
+------------------------------------------------------------

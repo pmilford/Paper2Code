@@ -1,0 +1,514 @@
+```python
+"""
+evaluation.py
+
+This module provides the Evaluation class, which handles evaluating a given model on a
+test (or validation) dataset and computing key metrics along with generating relevant plots
+for three types of experiments:
+  1. Compositional Regularization Experiment (Synthetic Arithmetic Task)
+  2. Label Noise Calibration Experiment (Image Classification with label noise)
+  3. Pest Detection Experiment
+
+It computes metrics such as mean square error (MSE), prediction accuracy (with tolerance for regression),
+Expected Calibration Error (ECE), and Environmental Robustness Score (ERS) and produces corresponding plots 
+using Matplotlib. All generated plots are saved in the "figures/" directory.
+
+Author: [Your Name]
+Date: [Date]
+"""
+
+import os
+import logging
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+import matplotlib.pyplot as plt
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+
+
+class Evaluation:
+    """
+    Evaluation class to evaluate a model on a test/validation dataset and generate metrics and plots.
+
+    Attributes:
+        model (torch.nn.Module): The model to evaluate.
+        data (Any): The dataset to run evaluation on (could be a list or a DataLoader).
+        config (Dict[str, Any]): Configuration dictionary loaded from config.yaml.
+        experiment_type (str): Type of experiment. Expected values: "synthetic_arithmetic",
+                                 "label_noise", or "pest_detection". Default is "synthetic_arithmetic".
+        augment_fn (Optional[Callable]): (For pest_detection) Function that applies augmentation
+                                          to images.
+    """
+
+    def __init__(self, model: torch.nn.Module, data: Any, config: Dict[str, Any],
+                 augment_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None) -> None:
+        """
+        Initialize the Evaluation instance.
+
+        Args:
+            model (torch.nn.Module): The model instance to evaluate.
+            data (Any): The evaluation dataset.
+            config (Dict[str, Any]): Configuration dictionary.
+            augment_fn (Optional[Callable]): Augmentation function for pest detection (if needed).
+        """
+        self.model: torch.nn.Module = model
+        self.data: Any = data
+        self.config: Dict[str, Any] = config
+        self.augment_fn: Optional[Callable[[np.ndarray], np.ndarray]] = augment_fn
+
+        # Determine the experiment type either from config or default to "synthetic_arithmetic"
+        self.experiment_type: str = self.config.get("experiment_type", "synthetic_arithmetic").lower()
+
+        # Evaluation-specific parameters
+        self.regression_tolerance: float = self.config.get("evaluation", {}).get("regression_tolerance", 1.0)
+        self.ece_bins: int = self.config.get("evaluation", {}).get("ece_bins", 15)
+
+        # Set device and ensure model is in evaluation mode
+        self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.model.eval()
+
+        # Wrap data into a DataLoader if it is not one already
+        if isinstance(self.data, DataLoader):
+            self.data_loader: DataLoader = self.data
+        else:
+            self.data_loader: DataLoader = DataLoader(
+                dataset=self.data,
+                batch_size=32,
+                shuffle=False,
+                collate_fn=self._collate_fn
+            )
+
+        # Ensure that the figures directory exists
+        os.makedirs("figures", exist_ok=True)
+        logging.info(f"Evaluation initialized for experiment type: {self.experiment_type}")
+
+    def _collate_fn(self, batch: List[Any]) -> Dict[str, torch.Tensor]:
+        """
+        Custom collate function to process raw data samples into batched tensors.
+
+        For "synthetic_arithmetic": converts string expressions to token indices using a fixed mapping.
+        For "label_noise" and "pest_detection": assumes samples have keys "image" (or "input") and "label" (or "target").
+
+        Args:
+            batch (List[Any]): List of data samples.
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary with "input" and "target" tensors.
+        """
+        if self.experiment_type == "synthetic_arithmetic":
+            inputs: List[torch.Tensor] = []
+            targets: List[torch.Tensor] = []
+            # Mapping: digits 0-9, '+' -> 10, '*' -> 11.
+            mapping: Dict[str, int] = {str(i): i for i in range(10)}
+            mapping.update({"+": 10, "*": 11})
+            for sample in batch:
+                expr: str = sample.get("input", "")
+                token_list: List[int] = [mapping.get(ch, 0) for ch in expr]
+                inputs.append(torch.tensor(token_list, dtype=torch.long))
+                targets.append(torch.tensor(sample.get("target", 0), dtype=torch.float32))
+            inputs_tensor: torch.Tensor = torch.stack(inputs)
+            targets_tensor: torch.Tensor = torch.stack(targets)
+            return {"input": inputs_tensor, "target": targets_tensor}
+        elif self.experiment_type in {"label_noise", "pest_detection"}:
+            # Check if samples contain "image" key.
+            if "image" in batch[0]:
+                images: List[torch.Tensor] = []
+                labels: List[torch.Tensor] = []
+                for sample in batch:
+                    img = sample.get("image")
+                    if isinstance(img, np.ndarray):
+                        img_tensor = torch.from_numpy(img).float()
+                        if img_tensor.ndim == 3 and img_tensor.shape[2] in {1, 3}:
+                            img_tensor = img_tensor.permute(2, 0, 1)
+                        images.append(img_tensor)
+                    else:
+                        images.append(torch.tensor(img, dtype=torch.float32))
+                    labels.append(torch.tensor(sample.get("label", 0), dtype=torch.long))
+                images_tensor: torch.Tensor = torch.stack(images)
+                labels_tensor: torch.Tensor = torch.stack(labels)
+                return {"input": images_tensor, "target": labels_tensor}
+            else:
+                # Fallback
+                inputs = [torch.tensor(sample["input"]) for sample in batch]
+                targets = [torch.tensor(sample["target"]) for sample in batch]
+                return {"input": torch.stack(inputs), "target": torch.stack(targets)}
+        else:
+            raise ValueError(f"Unsupported experiment type: {self.experiment_type}")
+
+    def _collate_fn_with_augmentation(self, batch: List[Any]) -> Dict[str, torch.Tensor]:
+        """
+        Collate function for pest detection evaluation that applies augmentation.
+
+        Args:
+            batch (List[Any]): List of data samples.
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary with augmented "input" images and "target" labels.
+        """
+        if "image" not in batch[0]:
+            return self._collate_fn(batch)
+        images: List[torch.Tensor] = []
+        labels: List[torch.Tensor] = []
+        for sample in batch:
+            img = sample.get("image")
+            if isinstance(img, np.ndarray):
+                if self.augment_fn is not None:
+                    try:
+                        img = self.augment_fn(img)
+                    except Exception as e:
+                        logging.error(f"Error applying augmentation: {e}")
+                img_tensor = torch.from_numpy(img).float()
+                if img_tensor.ndim == 3 and img_tensor.shape[2] in {1, 3}:
+                    img_tensor = img_tensor.permute(2, 0, 1)
+                images.append(img_tensor)
+            else:
+                images.append(torch.tensor(img, dtype=torch.float32))
+            labels.append(torch.tensor(sample.get("label", 0), dtype=torch.long))
+        images_tensor = torch.stack(images)
+        labels_tensor = torch.stack(labels)
+        return {"input": images_tensor, "target": labels_tensor}
+
+    def _compute_mse(self, predictions: torch.Tensor, targets: torch.Tensor) -> float:
+        """
+        Compute the Mean Squared Error (MSE) between predictions and targets.
+
+        Args:
+            predictions (torch.Tensor): Predicted values.
+            targets (torch.Tensor): Ground truth values.
+
+        Returns:
+            float: MSE value.
+        """
+        mse = torch.mean((predictions - targets) ** 2).item()
+        return mse
+
+    def _accuracy_with_tolerance(self, predictions: torch.Tensor, targets: torch.Tensor, tol: float) -> float:
+        """
+        Compute regression accuracy as the fraction of predictions within a tolerance of the targets.
+
+        Args:
+            predictions (torch.Tensor): Predicted values.
+            targets (torch.Tensor): True continuous values.
+            tol (float): Tolerance threshold.
+
+        Returns:
+            float: Accuracy (0.0 to 1.0).
+        """
+        preds = predictions.squeeze()
+        correct = (torch.abs(preds - targets) <= tol).float().mean().item()
+        return correct
+
+    def _compute_classification_accuracy(self, predictions: torch.Tensor, targets: torch.Tensor) -> float:
+        """
+        Compute classification accuracy for tasks using softmax outputs.
+
+        Args:
+            predictions (torch.Tensor): Logits output from the model.
+            targets (torch.Tensor): True labels.
+
+        Returns:
+            float: Classification accuracy.
+        """
+        pred_labels = torch.argmax(predictions, dim=1)
+        correct = (pred_labels == targets).float().mean().item()
+        return correct
+
+    def _compute_ece(self, probabilities: torch.Tensor, targets: torch.Tensor, num_bins: int = 15) -> float:
+        """
+        Compute Expected Calibration Error (ECE) using a binning approach.
+
+        Args:
+            probabilities (torch.Tensor): Predicted probabilities of shape [N, num_classes].
+            targets (torch.Tensor): True labels of shape [N].
+            num_bins (int): Number of bins to use.
+
+        Returns:
+            float: The computed ECE value.
+        """
+        confidences, predictions = torch.max(probabilities, dim=1)
+        accuracies = predictions.eq(targets)
+        ece = 0.0
+        bin_boundaries = torch.linspace(0, 1, num_bins + 1)
+        for bin_lower, bin_upper in zip(bin_boundaries[:-1], bin_boundaries[1:]):
+            in_bin = (confidences > bin_lower) * (confidences <= bin_upper)
+            prop_in_bin = in_bin.float().mean().item()
+            if prop_in_bin > 0:
+                accuracy_in_bin = accuracies[in_bin].float().mean().item()
+                avg_confidence_in_bin = confidences[in_bin].mean().item()
+                ece += prop_in_bin * abs(avg_confidence_in_bin - accuracy_in_bin)
+        return ece
+
+    def _compute_ers(self, normal_acc: float, augmented_acc: float) -> float:
+        """
+        Compute the Environmental Robustness Score (ERS) as the ratio of augmented accuracy to normal accuracy.
+
+        Args:
+            normal_acc (float): Classification accuracy under normal conditions.
+            augmented_acc (float): Classification accuracy under augmented conditions.
+
+        Returns:
+            float: ERS value (0 if normal_acc is 0).
+        """
+        if normal_acc == 0:
+            return 0.0
+        return augmented_acc / normal_acc
+
+    def _generate_plot(self, x: List[Any], y: List[float], title: str, xlabel: str,
+                         ylabel: str, filename: str, plot_type: str = "line") -> None:
+        """
+        Generate and save a plot with the given x, y data using Matplotlib.
+
+        Args:
+            x (List[Any]): X-axis values.
+            y (List[float]): Y-axis values.
+            title (str): Plot title.
+            xlabel (str): Label for the x-axis.
+            ylabel (str): Label for the y-axis.
+            filename (str): Filename for saving the plot (under figures/).
+            plot_type (str): Type of plot ("line", "bar", or "scatter").
+        """
+        try:
+            plt.figure(figsize=(8, 6), dpi=300)
+            if plot_type == "line":
+                plt.plot(x, y, marker='o')
+            elif plot_type == "bar":
+                plt.bar(x, y)
+            elif plot_type == "scatter":
+                plt.scatter(x, y)
+            else:
+                plt.plot(x, y, marker='o')
+            plt.title(title)
+            plt.xlabel(xlabel)
+            plt.ylabel(ylabel)
+            plt.tight_layout()
+            save_path = os.path.join("figures", filename)
+            plt.savefig(save_path)
+            plt.close()
+            logging.info(f"Plot saved: {save_path}")
+        except Exception as e:
+            logging.error(f"Error generating plot {filename}: {e}")
+
+    def _generate_reliability_diagram(self, probabilities: torch.Tensor, targets: torch.Tensor,
+                                      num_bins: int) -> None:
+        """
+        Generate and save a reliability diagram that plots average confidence versus empirical accuracy.
+
+        Args:
+            probabilities (torch.Tensor): Predicted probabilities (shape: [N, num_classes]).
+            targets (torch.Tensor): True labels (shape: [N]).
+            num_bins (int): Number of bins for the diagram.
+        """
+        try:
+            confidences, predictions = torch.max(probabilities, dim=1)
+            accuracies = predictions.eq(targets)
+            bin_boundaries = torch.linspace(0, 1, num_bins + 1)
+            bin_centers = (bin_boundaries[:-1] + bin_boundaries[1:]) / 2
+
+            avg_confidences = []
+            avg_accuracies = []
+            for bin_lower, bin_upper in zip(bin_boundaries[:-1], bin_boundaries[1:]):
+                in_bin = (confidences > bin_lower) * (confidences <= bin_upper)
+                if in_bin.sum() > 0:
+                    avg_conf = confidences[in_bin].mean().item()
+                    avg_acc = accuracies[in_bin].float().mean().item()
+                else:
+                    avg_conf = 0.0
+                    avg_acc = 0.0
+                avg_confidences.append(avg_conf)
+                avg_accuracies.append(avg_acc)
+            
+            plt.figure(figsize=(8, 6), dpi=300)
+            plt.plot(bin_centers.numpy(), avg_confidences, marker='o', label="Avg Confidence", color="blue")
+            plt.plot(bin_centers.numpy(), avg_accuracies, marker='x', label="Empirical Accuracy", color="red")
+            plt.xlabel("Confidence Bin")
+            plt.ylabel("Accuracy / Confidence")
+            plt.title("Reliability Diagram")
+            plt.legend()
+            plt.tight_layout()
+            save_path = os.path.join("figures", "reliability_diagram.png")
+            plt.savefig(save_path)
+            plt.close()
+            logging.info(f"Reliability diagram saved: {save_path}")
+        except Exception as e:
+            logging.error(f"Error generating reliability diagram: {e}")
+
+    def _evaluate_classification_accuracy(self, loader: DataLoader) -> float:
+        """
+        Helper function to compute classification accuracy for classification experiments.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+
+        Returns:
+            float: Overall classification accuracy.
+        """
+        total_correct: float = 0.0
+        total_samples: int = 0
+        self.model.eval()
+        with torch.no_grad():
+            for batch in loader:
+                inputs: torch.Tensor = batch["input"].to(self.device)
+                targets: torch.Tensor = batch["target"].to(self.device)
+                outputs: torch.Tensor = self.model(inputs)
+                preds = torch.argmax(outputs, dim=1)
+                total_correct += (preds == targets).float().sum().item()
+                total_samples += targets.size(0)
+        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+        return accuracy
+
+    def evaluate(self) -> Dict[str, Any]:
+        """
+        Run evaluation on the dataset and compute relevant metrics along with generating plots.
+
+        For "synthetic_arithmetic":
+          - Computes MSE, regression accuracy (within tolerance), and average compositional loss.
+          - Generates scatter and line plots.
+        For "label_noise":
+          - Computes classification accuracy and Expected Calibration Error (ECE).
+          - Generates a reliability diagram and a summary metrics bar plot.
+        For "pest_detection":
+          - Computes normal and augmented classification accuracy and the Environmental Robustness Score (ERS).
+          - Generates a grouped bar plot of the metrics.
+
+        Returns:
+            Dict[str, Any]: Dictionary of evaluation results and plot file paths.
+        """
+        self.model.eval()
+        all_predictions: List[torch.Tensor] = []
+        all_targets: List[torch.Tensor] = []
+        all_probabilities: List[torch.Tensor] = []  # Only used for classification tasks.
+        compositional_losses: List[float] = []  # Only for synthetic arithmetic experiments.
+
+        with torch.no_grad():
+            for batch in self.data_loader:
+                inputs: torch.Tensor = batch["input"].to(self.device)
+                targets: torch.Tensor = batch["target"].to(self.device)
+                outputs: torch.Tensor = self.model(inputs)
+                all_predictions.append(outputs.cpu())
+                all_targets.append(targets.cpu())
+                if self.experiment_type in {"label_noise", "pest_detection"}:
+                    probabilities = torch.softmax(outputs, dim=1)
+                    all_probabilities.append(probabilities.cpu())
+                if self.experiment_type == "synthetic_arithmetic":
+                    comp_loss = self.model.compositional_loss.item() if hasattr(self.model, "compositional_loss") else 0.0
+                    compositional_losses.append(comp_loss)
+
+        predictions_tensor: torch.Tensor = torch.cat(all_predictions, dim=0)
+        targets_tensor: torch.Tensor = torch.cat(all_targets, dim=0)
+
+        results: Dict[str, Any] = {}
+        plots: Dict[str, str] = {}
+
+        if self.experiment_type == "synthetic_arithmetic":
+            mse: float = self._compute_mse(predictions_tensor.squeeze(), targets_tensor)
+            regression_acc: float = self._accuracy_with_tolerance(predictions_tensor, targets_tensor, self.regression_tolerance)
+            avg_comp_loss: float = float(np.mean(compositional_losses)) if compositional_losses else 0.0
+
+            results.update({
+                "mse": mse,
+                "regression_accuracy": regression_acc,
+                "average_compositional_loss": avg_comp_loss
+            })
+
+            try:
+                preds_np = predictions_tensor.squeeze().numpy()
+                targets_np = targets_tensor.numpy()
+                plt.figure(figsize=(8, 6), dpi=300)
+                plt.scatter(targets_np, preds_np, color="blue", alpha=0.6)
+                x_vals = np.linspace(min(targets_np), max(targets_np), 100)
+                plt.plot(x_vals, x_vals, color="green", linestyle="--", label="y = x")
+                plt.plot(x_vals, x_vals + self.regression_tolerance, color="red", linestyle=":",
+                         label=f"Tolerance: ±{self.regression_tolerance}")
+                plt.plot(x_vals, x_vals - self.regression_tolerance, color="red", linestyle=":")
+                plt.xlabel("Ground Truth")
+                plt.ylabel("Predictions")
+                plt.title("Predictions vs Ground Truth (Synthetic Arithmetic)")
+                plt.legend()
+                plt.tight_layout()
+                scatter_path = os.path.join("figures", "synthetic_arithmetic_scatter.png")
+                plt.savefig(scatter_path)
+                plt.close()
+                plots["synthetic_arithmetic_scatter"] = scatter_path
+            except Exception as e:
+                logging.error(f"Error generating synthetic arithmetic scatter plot: {e}")
+
+            try:
+                # Plot compositional loss over batches (each batch evaluation)
+                batch_indices = list(range(1, len(compositional_losses) + 1))
+                self._generate_plot(batch_indices, compositional_losses,
+                                    "Compositional Loss over Batches",
+                                    "Batch", "Compositional Loss",
+                                    "compositional_loss.png", plot_type="line")
+                plots["compositional_loss"] = os.path.join("figures", "compositional_loss.png")
+            except Exception as e:
+                logging.error(f"Error generating compositional loss plot: {e}")
+
+        elif self.experiment_type == "label_noise":
+            probabilities_tensor: torch.Tensor = torch.cat(all_probabilities, dim=0)
+            class_acc: float = self._compute_classification_accuracy(predictions_tensor, targets_tensor)
+            ece: float = self._compute_ece(probabilities_tensor, targets_tensor, self.ece_bins)
+
+            results.update({
+                "classification_accuracy": class_acc,
+                "ece": ece
+            })
+
+            try:
+                self._generate_reliability_diagram(probabilities_tensor, targets_tensor, self.ece_bins)
+                plots["reliability_diagram"] = os.path.join("figures", "reliability_diagram.png")
+            except Exception as e:
+                logging.error(f"Error generating reliability diagram: {e}")
+
+            try:
+                metrics_x = ["Accuracy", "ECE"]
+                metrics_y = [class_acc, ece]
+                self._generate_plot(metrics_x, metrics_y, "Label Noise Evaluation Metrics",
+                                    "Metric", "Value",
+                                    "label_noise_metrics.png", plot_type="bar")
+                plots["label_noise_metrics"] = os.path.join("figures", "label_noise_metrics.png")
+            except Exception as e:
+                logging.error(f"Error generating label noise metrics plot: {e}")
+
+        elif self.experiment_type == "pest_detection":
+            # Evaluate under normal conditions.
+            normal_acc: float = self._evaluate_classification_accuracy(self.data_loader)
+            augmented_acc: float = 0.0
+            if self.augment_fn is not None:
+                augmented_loader = DataLoader(
+                    dataset=self.data,
+                    batch_size=32,
+                    shuffle=False,
+                    collate_fn=self._collate_fn_with_augmentation
+                )
+                augmented_acc = self._evaluate_classification_accuracy(augmented_loader)
+            ers: float = self._compute_ers(normal_acc, augmented_acc)
+
+            results.update({
+                "normal_classification_accuracy": normal_acc,
+                "augmented_classification_accuracy": augmented_acc,
+                "environmental_robustness_score": ers
+            })
+
+            try:
+                categories = ["Normal Acc", "Augmented Acc", "ERS"]
+                values = [normal_acc, augmented_acc, ers]
+                self._generate_plot(categories, values, "Pest Detection Evaluation Metrics",
+                                    "Metric", "Value",
+                                    "pest_detection_metrics.png", plot_type="bar")
+                plots["pest_detection_metrics"] = os.path.join("figures", "pest_detection_metrics.png")
+            except Exception as e:
+                logging.error(f"Error generating pest detection metrics plot: {e}")
+        else:
+            logging.error(f"Unsupported experiment type: {self.experiment_type}")
+
+        results["plots"] = plots
+        return results
+
+# End of evaluation.py
+```

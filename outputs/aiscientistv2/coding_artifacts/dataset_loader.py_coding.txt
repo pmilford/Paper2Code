@@ -1,0 +1,301 @@
+```python
+"""
+dataset_loader.py
+
+This module contains the DatasetLoader class, which is responsible for loading, preprocessing,
+and splitting datasets for the three experiments:
+  1. Synthetic Arithmetic Experiment
+  2. Label Noise Calibration Experiment
+  3. Pest Detection Experiment
+
+It uses Hugging Face's datasets library for standard datasets and NumPy for synthetic data generation,
+random splitting, and noise injection. Data augmentation for the pest detection experiment is also provided
+using basic enhancements from PIL (if available).
+
+Author: [Your Name]
+Date: [Date]
+"""
+
+import random
+import logging
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+
+# Import Hugging Face datasets library for loading standard datasets.
+from datasets import load_dataset
+
+# Attempt to import PIL for image augmentation (if not available, augmentation will be a no-op).
+try:
+    from PIL import Image, ImageEnhance, ImageFilter
+except ImportError:
+    Image = None
+
+# Set up logging configuration.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+class DatasetLoader:
+    """DatasetLoader class to load and preprocess data for different experiments."""
+
+    def __init__(self, config: Dict[str, Any], experiment_type: str) -> None:
+        """
+        Initialize the DatasetLoader.
+
+        Args:
+            config (Dict[str, Any]): A configuration dictionary with global settings.
+            experiment_type (str): Type of experiment. Should be one of:
+                "synthetic_arithmetic", "label_noise", or "pest_detection".
+        """
+        self.config: Dict[str, Any] = config
+        self.experiment_type: str = experiment_type
+        # Set random seed from configuration (default is 42)
+        self.random_seed: int = self.config.get("general", {}).get("random_seed", 42)
+        np.random.seed(self.random_seed)
+        random.seed(self.random_seed)
+        # Data split ratios from config; defaults: train=0.7, validation=0.15, test=0.15
+        self.data_split: Dict[str, float] = self.config.get("general", {}).get(
+            "data_split", {"train": 0.7, "validation": 0.15, "test": 0.15}
+        )
+        logging.info(
+            f"DatasetLoader initialized with experiment_type: {self.experiment_type}, "
+            f"random_seed: {self.random_seed}, data_split: {self.data_split}"
+        )
+
+    def load_data(self) -> Tuple[Any, Any, Any]:
+        """
+        Load and preprocess data based on the experiment type.
+
+        Returns:
+            Tuple containing (train_data, validation_data, test_data).
+        """
+        if self.experiment_type == "synthetic_arithmetic":
+            return self._load_synthetic_arithmetic_data()
+        elif self.experiment_type == "label_noise":
+            return self._load_label_noise_data()
+        elif self.experiment_type == "pest_detection":
+            return self._load_pest_detection_data()
+        else:
+            raise ValueError(f"Unsupported experiment type: {self.experiment_type}")
+
+    def _load_synthetic_arithmetic_data(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Generate a synthetic arithmetic dataset.
+
+        Generates arithmetic expressions with one-digit numbers using operators '+' and '*'
+        and computes the numeric result. The total number of samples is defaulted to 1200,
+        which is then split into training, validation, and test sets using the configured ratios.
+
+        Returns:
+            Tuple of lists: (train_data, validation_data, test_data).
+        """
+        num_total_samples: int = 1200
+        data: List[Dict[str, Any]] = []
+        operators: List[str] = ["+", "*"]
+        for _ in range(num_total_samples):
+            a: int = int(np.random.randint(0, 10))
+            b: int = int(np.random.randint(0, 10))
+            op: str = np.random.choice(operators)
+            expression: str = f"{a}{op}{b}"
+            try:
+                result: int = eval(expression)
+            except Exception as ex:
+                logging.error(f"Error evaluating expression {expression}: {ex}")
+                result = 0
+            data.append({"input": expression, "target": result})
+
+        logging.info(f"Generated {len(data)} synthetic arithmetic samples.")
+        train_data, val_data, test_data = self._split_data(data)
+        logging.info(
+            f"Synthetic arithmetic dataset split: {len(train_data)} train, "
+            f"{len(val_data)} validation, {len(test_data)} test samples."
+        )
+        return train_data, val_data, test_data
+
+    def _load_label_noise_data(self) -> Tuple[Any, Any, Any]:
+        """
+        Load a standard dataset for the label noise calibration experiment using Hugging Face datasets.
+
+        Currently, this function loads the CIFAR-10 dataset. It then splits the available 'train'
+        split into training and validation sets based on the configured ratios. The test split is taken
+        as provided by the dataset.
+
+        Returns:
+            Tuple: (train_dataset, validation_dataset, test_dataset) as Hugging Face Dataset objects.
+        """
+        dataset = load_dataset("cifar10")
+        logging.info("Loaded CIFAR-10 dataset for label noise experiment.")
+
+        # Split the original training data into training and validation datasets.
+        # Compute test_size for validation from the train split using ratios: validation_ratio / (train_ratio + validation_ratio)
+        train_val_split: float = self.data_split["validation"] / (self.data_split["train"] + self.data_split["validation"])
+        train_val = dataset["train"].train_test_split(
+            test_size=train_val_split, seed=self.random_seed
+        )
+        train_dataset = train_val["train"]
+        val_dataset = train_val["test"]
+        test_dataset = dataset["test"]
+
+        logging.info(
+            f"CIFAR-10 dataset split: {len(train_dataset)} train, {len(val_dataset)} validation, "
+            f"{len(test_dataset)} test samples."
+        )
+        return train_dataset, val_dataset, test_dataset
+
+    def _load_pest_detection_data(self) -> Tuple[Any, Any, Any]:
+        """
+        Load the pest detection dataset.
+
+        Attempts to load the dataset using Hugging Face's load_dataset with the identifier "pest_detection".
+        If not available, generates a dummy pest detection dataset with random images.
+        Applies splitting based on the configured ratios.
+
+        Returns:
+            Tuple: (train_data, validation_data, test_data), either as Hugging Face Dataset objects
+            or as lists of dictionaries.
+        """
+        try:
+            dataset = load_dataset("pest_detection")
+            logging.info("Loaded pest detection dataset from Hugging Face.")
+        except Exception as e:
+            logging.warning("Pest detection dataset not found. Generating a dummy pest detection dataset.")
+            num_dummy_samples: int = 500
+            dummy_data: List[Dict[str, Any]] = []
+            for _ in range(num_dummy_samples):
+                # Generate a dummy image: 224x224 RGB with random pixel values.
+                image: np.ndarray = np.random.randint(0, 256, size=(224, 224, 3), dtype=np.uint8)
+                # Assume 5 classes for pest detection.
+                label: int = int(np.random.randint(0, 5))
+                dummy_data.append({"image": image, "label": label})
+            train_data, val_data, test_data = self._split_data(dummy_data)
+            logging.info(
+                f"Dummy pest detection dataset split: {len(train_data)} train, "
+                f"{len(val_data)} validation, {len(test_data)} test samples."
+            )
+            return train_data, val_data, test_data
+
+        # Check if dataset already has splits.
+        if "train" in dataset and "test" in dataset:
+            train_val_split: float = self.data_split["validation"] / (self.data_split["train"] + self.data_split["validation"])
+            train_val = dataset["train"].train_test_split(
+                test_size=train_val_split, seed=self.random_seed
+            )
+            train_dataset = train_val["train"]
+            val_dataset = train_val["test"]
+            test_dataset = dataset["test"]
+            logging.info(
+                f"Pest detection dataset split: {len(train_dataset)} train, {len(val_dataset)} validation, "
+                f"{len(test_dataset)} test samples."
+            )
+            return train_dataset, val_dataset, test_dataset
+        else:
+            # If no pre-defined splits, convert dataset to list and split.
+            data_list = list(dataset)
+            train_data, val_data, test_data = self._split_data(data_list)
+            logging.info(
+                f"Pest detection (non-split) dataset split: {len(train_data)} train, "
+                f"{len(val_data)} validation, {len(test_data)} test samples."
+            )
+            return train_data, val_data, test_data
+
+    def _split_data(self, data: List[Any]) -> Tuple[List[Any], List[Any], List[Any]]:
+        """
+        Split data into training, validation, and test sets using the configured ratios.
+
+        Args:
+            data (List[Any]): The complete dataset as a list.
+
+        Returns:
+            Tuple[List[Any], List[Any], List[Any]]: (train_data, validation_data, test_data)
+        """
+        total_samples: int = len(data)
+        indices: np.ndarray = np.random.permutation(total_samples)
+        train_end: int = int(self.data_split["train"] * total_samples)
+        val_end: int = train_end + int(self.data_split["validation"] * total_samples)
+        train_indices: np.ndarray = indices[:train_end]
+        val_indices: np.ndarray = indices[train_end:val_end]
+        test_indices: np.ndarray = indices[val_end:]
+
+        train_data: List[Any] = [data[i] for i in train_indices]
+        val_data: List[Any] = [data[i] for i in val_indices]
+        test_data: List[Any] = [data[i] for i in test_indices]
+
+        return train_data, val_data, test_data
+
+    def inject_label_noise(self, data: List[Dict[str, Any]], noise_type: str, noise_level: float) -> List[Dict[str, Any]]:
+        """
+        Inject synthetic label noise into the dataset.
+
+        Args:
+            data (List[Dict[str, Any]]): The dataset as a list of dictionaries with a "label" key.
+            noise_type (str): Type of noise to inject ("symmetric" or "asymmetric").
+            noise_level (float): Fraction of samples to perturb (between 0 and 1).
+
+        Returns:
+            List[Dict[str, Any]]: The dataset with noisy labels.
+        """
+        new_data: List[Dict[str, Any]] = []
+        # Determine number of classes from the data.
+        labels: List[int] = [item["label"] for item in data if "label" in item]
+        num_classes: int = int(max(labels)) + 1 if labels else 0
+
+        for item in data:
+            original_label: int = item["label"]
+            if np.random.rand() < noise_level:
+                if noise_type == "symmetric":
+                    possible_labels: List[int] = list(range(num_classes))
+                    if original_label in possible_labels:
+                        possible_labels.remove(original_label)
+                    noisy_label: int = int(np.random.choice(possible_labels))
+                elif noise_type == "asymmetric":
+                    # Map label i to (i+1) modulo num_classes.
+                    noisy_label = (original_label + 1) % num_classes
+                else:
+                    noisy_label = original_label
+                new_item = item.copy()
+                new_item["label"] = noisy_label
+                new_data.append(new_item)
+            else:
+                new_data.append(item)
+        logging.info(f"Injected {noise_level * 100:.1f}% {noise_type} noise into {len(new_data)} samples.")
+        return new_data
+
+    def apply_augmentation(self, image: np.ndarray, augmentation_params: Dict[str, float]) -> np.ndarray:
+        """
+        Apply image augmentation to simulate environmental variability.
+
+        Supported augmentations (if PIL is available):
+          - Brightness adjustment ("brightness": factor)
+          - Contrast adjustment ("contrast": factor)
+          - Gaussian blur ("gaussian_blur": radius)
+          - Rotation ("rotation": angle in degrees)
+
+        Args:
+            image (np.ndarray): Input image as a NumPy array.
+            augmentation_params (Dict[str, float]): Dictionary of augmentation parameters.
+
+        Returns:
+            np.ndarray: Augmented image as a NumPy array.
+        """
+        if Image is None:
+            logging.warning("PIL not available. Skipping augmentation.")
+            return image
+
+        pil_image = Image.fromarray(image)
+        if "brightness" in augmentation_params:
+            factor = augmentation_params["brightness"]
+            enhancer = ImageEnhance.Brightness(pil_image)
+            pil_image = enhancer.enhance(factor)
+        if "contrast" in augmentation_params:
+            factor = augmentation_params["contrast"]
+            enhancer = ImageEnhance.Contrast(pil_image)
+            pil_image = enhancer.enhance(factor)
+        if "gaussian_blur" in augmentation_params:
+            radius = augmentation_params["gaussian_blur"]
+            pil_image = pil_image.filter(ImageFilter.GaussianBlur(radius=radius))
+        if "rotation" in augmentation_params:
+            angle = augmentation_params["rotation"]
+            pil_image = pil_image.rotate(angle)
+        augmented_image = np.array(pil_image)
+        return augmented_image
+```

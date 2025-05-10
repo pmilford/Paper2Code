@@ -1,0 +1,144 @@
+Below is a detailed logic analysis outlining how evaluation.py should work. This analysis is written from the perspective of the Evaluation class—which is responsible for evaluating a given model on a validation/test set, computing key metrics (mean square error, prediction accuracy with tolerance, Expected Calibration Error, and Environmental Robustness Score), and generating corresponding plots via Matplotlib.
+
+─────────────────────────────  
+1. CLASS INITIALIZATION & INPUTS
+
+• The Evaluation class’s constructor (__init__) should accept the following inputs:  
+ – model: an already‐initialized model (which could be either an LSTM‐based model for the compositional experiment or a ResNet‐18–based model for the image experiments).  
+ – data: the test (or validation) dataset; note that data may come in different formats depending on the experiment type (for example, a list or DataLoader of tensors for arithmetic data or images for classification).  
+ – config: a dictionary (or configuration object read from config.yaml) containing experiment parameters. This includes details such as loss functions, tolerance settings (for “within tolerance” accuracy in the arithmetic experiment), noise injection parameters, and (if applicable) augmentation settings for pest detection.  
+ – (Optionally) additional parameters such as an augmentation function for pest detection evaluation.
+
+The Evaluation class should call model.eval() and wrap forward passes inside a torch.no_grad() block for efficiency and to avoid gradient computations.
+
+─────────────────────────────  
+2. EXPERIMENT-SPECIFIC EVALUATION LOGIC
+
+Since our system must support three different experimental setups, the evaluation logic will branch according to the type of experiment.
+
+A. Compositional Regularization Experiment (Synthetic Arithmetic Sequence Task)
+
+ 1. Metrics to Compute:  
+  – Mean Square Error (MSE): Compute the squared difference between each predicted continuous output (from the LSTM-based model) and its corresponding ground truth value, then average over the test set.  
+  – Prediction Accuracy with Tolerance:  
+   • Define a tolerance (either passed in via the config or set as a default, e.g., 0.1).  
+   • For each test example, if |prediction − ground truth| ≤ tolerance, count it as correct; then compute accuracy as the percentage of correct predictions.  
+  – Compositional Loss: If during training a “compositional loss” (e.g., the mean squared difference between successive input embeddings) was computed and stored in logs, report this value (or recompute it on the test set if possible).
+
+ 2. Plot Generation:  
+  – Generate line plots of test MSE over the test set (if the evaluation is done epoch‐by-epoch, then plot the learning curve).  
+  – Create a plot of prediction accuracy with tolerance.  
+  – Optionally, display a scatter plot comparing predictions versus ground truth with a line indicating the tolerance margin.
+
+B. Label Noise Calibration Experiment
+
+ 1. Metrics to Compute:  
+  – Classification Accuracy: Evaluate the percentage of test examples where the model’s predicted label (via argmax on softmax probabilities) matches the true label.  
+  – Expected Calibration Error (ECE):  
+   • Use a binning approach on the model’s output probabilities (for instance, choose 10–15 bins between 0 and 1).  
+   • For each bin, compute the average predicted confidence and the empirical accuracy (the fraction of correct predictions falling into that bin).  
+   • Compute the weighted average of the absolute difference between these two numbers over all bins.  
+  – (Optionally) Prepare data for a reliability diagram. Although the paper mentions reliability diagrams, it is acceptable for the evaluation function to both compute ECE numerically and generate the diagram as a plot.
+
+ 2. Plot Generation:  
+  – Generate a reliability diagram (e.g., a bar or line plot) that plots the average confidence versus actual accuracy per bin.  
+  – Also generate a simple line or bar plot showing the overall prediction accuracy and the ECE for various noise levels (if data from different noise levels is provided).
+
+C. Pest Detection Experiment
+
+ 1. Metrics to Compute:  
+  – Classification Accuracy (Normal Conditions): Run the model on the test set of the pest detection images under “normal” conditions and compute accuracy in the standard way.  
+  – Classification Accuracy (Augmented / Challenging Conditions):  
+   • Apply a predefined set of augmentations (brightness/contrast adjustments, Gaussian blur, random affine transformations) to the test images before passing them through the model.  
+   • Compute the accuracy for these “challenging” conditions.  
+  – Environmental Robustness Score (ERS): Use the formula  
+    ERS = (Accuracy under challenging/augmented conditions) / (Accuracy under normal conditions)  
+   • Ensure that division by zero is handled if the normal accuracy is exceptionally low.
+
+ 2. Plot Generation:  
+  – Create a bar chart or grouped bar plot that displays “Normal Accuracy,” “Augmented Accuracy,” and the resulting ERS side by side.  
+  – Optionally, if multiple experiments (e.g., different learning rates from grid search) are run, produce line plots comparing these metrics over epochs or over the learning rate values.
+
+─────────────────────────────  
+3. HELPER FUNCTIONS & INTERNAL METHODS
+
+Inside evaluation.py, the Evaluation class should have several helper functions. For example:
+
+• _compute_mse(predictions, targets):  
+ – Takes predicted tensor and targets tensor, computes and returns the mean squared error.
+
+• _accuracy_with_tolerance(predictions, targets, tol):  
+ – Iterates over the predictions and targets (suitable for the synthetic arithmetic task) and returns a percentage of predictions falling within the specified tolerance.  
+ – “tol” can be a parameter from the config (or a default value).
+
+• _compute_classification_accuracy(predicted_labels, true_labels):  
+ – For classification tasks (label noise and pest detection), compares the predicted labels (obtained via argmax) with the true labels.
+
+• _compute_ece(probabilities, true_labels, num_bins=15):  
+ – Bins the confidence scores from the probabilities, computes per-bin accuracy and average confidence, and returns the overall ECE as the weighted sum of absolute differences.
+
+• _compute_ers(normal_acc, augmented_acc):  
+ – Given the two accuracies, returns the Environmental Robustness Score (with safe handling when normal_acc is zero).
+
+• _generate_plot(data, title, xlabel, ylabel, filename):  
+ – A generic helper function to produce and save a Matplotlib plot into the “figures/” directory.
+ – Use try/except blocks so that failure in one plot does not break the overall evaluation.
+
+• _generate_reliability_diagram(probabilities, true_labels):  
+ – Generates and saves a reliability diagram (this function can use the outputs from _compute_ece() and additional bin statistics).
+
+─────────────────────────────  
+4. WORKFLOW INSIDE evaluate() METHOD
+
+The main evaluate() method should proceed as follows:
+
+1. Set the model to evaluation mode and disable gradient computations (using torch.no_grad()).  
+2. Iterate over the test data (which may be organized in mini-batches via a DataLoader) and obtain the model’s predictions.  
+3. Depending on the experiment type (which can be determined using a flag from the config or passed explicitly), branch into one of the following evaluation routines:  
+ a. If the experiment is “compositional_reg”:  
+  – Compute MSE between predictions and targets.  
+  – Compute the “within tolerance” accuracy.  
+  – (Optionally) Compute compositional loss if the necessary outputs are available.  
+ b. If the experiment is “label_noise”:  
+  – Compute classification accuracy using argmax on the output probabilities.  
+  – Also extract the probabilities for each prediction and compute the ECE.  
+  – Optionally prepare data for the reliability diagram plot.  
+ c. If the experiment is “pest_detection”:  
+  – First, evaluate on normal test images and record accuracy.  
+  – Then, apply an augmentation function (which can be defined either within evaluation or in utils) to the test images and compute a second accuracy.  
+  – Compute the ERS as the ratio of these two accuracies.  
+4. Aggregate these metrics into a results dictionary.  
+5. Call the appropriate plotting helper functions to generate and save visualization files (ensuring that the file paths are stored in the results dictionary/logging for reproducibility).  
+6. Return the results dictionary to the caller (i.e. main.py or experiment_manager.py).
+
+─────────────────────────────  
+5. GENERAL CONSIDERATIONS
+
+• Reproducibility:  
+ – Use the fixed random seed from the general config (random_seed: 42).  
+ – Ensure that all outputs (numpy arrays, plots) are saved with consistent file names and in a dedicated “figures/” folder.
+
+• Integration with Other Modules:  
+ – The Evaluation class is imported by main.py and experiment_manager.py. All evaluation metrics and plots must be compatible with what these modules expect.  
+ – Logging of computed metrics and saving of checkpointed evaluation results should utilize shared utility functions (from utils.py).
+
+• Plot Robustness:  
+ – Each plot-generation call should be wrapped in a try/except block, with error logs recorded in case a plot fails.  
+ – Use consistent style guidelines (e.g., clear titles, axis labels, legends, dpi settings) to ensure the plots can be directly integrated into the final manuscript.
+
+• Config-Driven Parameters:  
+ – For each experiment, parameters such as learning rate, loss function, batch size, and debugging flags come from the config.yaml. Although evaluation may not change these values, if any metric (e.g., the tolerance for accuracy in the arithmetic experiment) needs a value, it must be either hard-coded with a clear default or extracted from the configuration.
+
+─────────────────────────────  
+6. SUMMARY
+
+In summary, the Evaluation class in evaluation.py must:
+ • Determine the experiment type and run the corresponding evaluation routine.
+ • Compute numerical metrics:
+  – For synthetic arithmetic: MSE and “within tolerance” accuracy (plus optionally the compositional loss).
+  – For label noise: Classification accuracy and ECE (and prepare reliability diagram data).
+  – For pest detection: Classification accuracy under normal versus augmented conditions and ERS.
+ • Generate and save plots using Matplotlib, ensuring that each plot is saved to “figures/” with proper labeling.
+ • Return all computed metrics in a dictionary so that the ExperimentManager and main module can aggregate results and perform replication and reproducibility checks.
+
+This thorough analysis should guide the modular design in evaluation.py, ensuring that the implementation faithfully reproduces the reported experimental evaluation steps and supports our overall tree-search autonomous research pipeline.

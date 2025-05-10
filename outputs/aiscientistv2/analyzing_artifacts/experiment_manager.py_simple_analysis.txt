@@ -1,0 +1,113 @@
+# Logic Analysis for experiment_manager.py
+
+"""
+Overview:
+-----------
+The ExperimentManager class serves as the central controller for the entire experimental lifecycle. It is responsible for coordinating multiple stages of experiments using our tree search–based framework. The primary stages are:
+  • Stage 1 – Preliminary Investigation
+  • Stage 2 – Hyperparameter Tuning
+  • Stage 3 – Research Agenda Execution
+  • Stage 4 – Ablation Studies
+
+In each stage, the manager must spawn multiple “nodes” (experimental runs) that execute variants of our experiments. Each node is generated via LLM-assisted code modifications and is executed concurrently (using parallel processing). The ExperimentManager both monitors node execution and collects performance metrics, error logs, and output artifacts (e.g., numpy results, generated plots).
+
+Key Configuration and Parameters (sourced from config.yaml):
+  • Debug Probability: 1.0 (i.e. if a node is flagged as buggy, always attempt a debug branch)
+  • Maximum Debug Depth: 3 – a node will only be debugged up to three levels deep, preventing infinite loops
+  • Maximum Experiment Runtime per Node: "1h"
+  • Node Allocation:
+       - Stage 1: 21 nodes
+       - Stage 2: 12 nodes
+       - Stage 3: 12 nodes
+       - Stage 4: 12 nodes
+  • Global random_seed and data_split parameters (e.g., 70% train, 15% validation, 15% test) are also set via shared configuration.
+
+Responsibilities and Flow:
+----------------------------
+1. Initialization and Setup:
+   • Read the configuration (e.g., debug_probability, node allocation, random_seed) from a central config.
+   • Initialize logging facilities and set the global random seed (via a utility function).
+   • Prepare the dataset(s) by calling the DatasetLoader module (which uses Hugging Face datasets) – this will provide the (train, test) splits required for each experiment.
+   • (Optionally) Instantiate initial Model objects if a baseline experiment is needed for the first stage.
+
+2. Node Structure:
+   Each experimental “node” (or branch in our tree search) is represented by a data structure (e.g., a dictionary or custom object) which includes:
+     • Node ID, stage (identifier for which stage the node belongs to), and an optional reference to its parent node.
+     • Current debug depth (to enforce the maximum debug depth).
+     • The generated experiment plan/code snippet (as produced by the LLM in earlier stages).
+     • Node execution status: “non-buggy” if the node executed successfully or “buggy” if an error (or VLM flag) occurred.
+     • Error logs (if execution fails), performance metrics (training loss, test accuracy, compositional loss, etc.), and paths to any saved output artifacts (e.g., numpy files, plots).
+
+3. Stage Execution and Parallel Node Processing:
+   • For each stage (preliminary, hyperparameter tuning, research agenda execution, ablation studies):
+       - Use configuration-based node_allocation to determine the number of nodes to spawn.
+       - For each node, create an instance of Trainer (and if applicable Evaluation) to run the experiment.
+       - Execute nodes concurrently (e.g., using Python’s multiprocessing/job scheduling) to accelerate exploration.
+       - Each node’s Trainer performs its standard forward pass, computes losses (including any additional terms like the compositional regularization or standard cross-entropy loss), applies backpropagation, and returns training metrics along with any error information.
+
+4. Debugging Strategy:
+   • Evaluate the output of each node. If a node fails (e.g. runtime error or flagged by VLM reviewer due to poor-quality plots or missing legends/labels), mark the node as “buggy.”
+   • Given the debug_probability value (1.0 in our config), every buggy node should trigger a “debug branch”:
+         - If the node’s current debug_depth is less than the maximum allowed (3), automatically initiate a debugging routine.
+         - The debugging branch will modify (or “debug”) the experiment code (e.g., using stored error logs in conjunction with LLM suggestions) and re-run the experiment.
+         - This mechanism ensures that nodes with errors get a chance to recover automatically, while respecting the max debug depth to prevent infinite loops.
+
+5. Node Evaluation and Best Node Selection:
+   • After all nodes are executed for a given stage, collect all the metrics from each node.
+   • Use an evaluation routine (which may leverage an LLM “evaluator” or a defined scoring function) that considers:
+         - Training loss, test loss, and accuracy (or within tolerance prediction accuracy).
+         - For compositional regularization experiments: also consider the compositional loss metrics.
+         - Visual quality of generated plots (as flagged by the VLM reviewer).
+   • Based on these criteria, select the “best” node. This best node becomes the seed for refining the experiment in the next stage.
+
+6. Replication for Statistical Robustness:
+   • Once the best node is determined after a stage, run multiple replications of the same experimental setup under different random seeds.
+   • Aggregate the results (calculate mean and standard deviation for each metric) to ensure reproducibility and to quantify experimental variability.
+
+7. Transition Between Stages:
+   • The selected best node (or its replicated version’s configuration) is passed forward as the starting point for the subsequent stage.
+   • This iterative process allows the tree search to become progressively “deeper” and more refined with each stage.
+
+8. Aggregation and Final Output:
+   • After the final stage (Ablation Studies), the ExperimentManager aggregates results – combining performance metrics, plots, and log files.
+   • The final aggregated results (including statistical summaries and failure logs) are returned to main.py.
+   • These aggregated results will be used later for generating the final manuscript in the Manuscript Generation Module.
+
+9. Logging, Checkpointing, and Utilities:
+   • Throughout the process, leverage utility functions (from utils.py) for:
+         - Consistent configuration management
+         - Logging of experiment start/end times, errors, and metrics
+         - Checkpointing outputs (e.g., saving model weights, numpy files, and plots)
+         - Random seed initialization for reproducibility
+   • All experiment decisions (node expansions, debug attempts, replication outcomes) must be logged for traceability.
+
+Edge Cases / Ambiguities to Address:
+-------------------------------------
+  • The exact format for representing a “node” and how to capture its complete metadata (code, status, metrics, etc.) should be standardized.
+  • The specific evaluation criteria (e.g., weightings or thresholds) for selecting the “best” node must be defined based on the experiment type – for instance, the “within tolerance” accuracy for the compositional experiment or ECE for label noise experiments.
+  • Although integration of LLM/VLM for code generation and plot evaluation is mentioned, the current implementation may use placeholder functions or stubs until full API integration is decided.
+  • Details of the synthetic arithmetic dataset generation, label noise injection method, and pest detection augmentation parameters (brightness/contrast factors, affine degrees, etc.) are not fully specified. The ExperimentManager should be flexible enough to accept these parameters from a central configuration or via utility helpers.
+
+Summary Flow Diagram (High Level):
+-------------------------------------
+  1. Initialize ExperimentManager:
+        • Load configuration and set random seed.
+        • Instantiate DatasetLoader and load datasets.
+  
+  2. For each experimental stage:
+        • Spawn the required number of nodes based on node_allocation.
+        • For each node:
+              - Instantiate a Trainer with the node-specific settings.
+              - Run the training (and then Evaluation) process.
+              - Collect metrics, check for errors, and mark status (buggy/non-buggy).
+              - If buggy and debug_depth < max_debug_depth, invoke a debug branch.
+        • After node completion: use evaluation routine to select the best-performing node.
+  
+  3. Replicate the best node with several random seeds to compute mean ± std metrics.
+  
+  4. Pass the best node configuration to the next stage.
+  
+  5. After the final stage, aggregate all results and return a comprehensive summary to main.py.
+
+By following the above logic, the ExperimentManager will orchestrate an end-to-end reproducible, modular, and autonomous experimental process that mirrors the experimental methodology described in the paper. This includes rigorous logging, automated debugging, parallel node processing, and final aggregation of results that will serve as the basis for the final research manuscript.
+"""
